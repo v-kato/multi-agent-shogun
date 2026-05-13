@@ -95,6 +95,7 @@
 !scripts/seo_qc.py
 !scripts/seo_qc.sh
 !scripts/stop_hook_inbox.sh
+!scripts/session_start_hook.sh
 !scripts/agent_status.sh
 !scripts/ratelimit_check.sh
 !scripts/switch_cli.sh
@@ -106,6 +107,7 @@
 !saytask/streaks.yaml.sample
 
 # Reports (private — not tracked)
+logs/
 
 # Memory (MEMORY.md is private; only the sample template is OSS)
 !memory/
@@ -151,6 +153,7 @@
 !skills/shogun-screenshot/scripts/*.sh
 !skills/shogun-screenshot/scripts/*.py
 # shogun-codd: cmd_475 で privategit only に変更 (upstream 混入リスク回避)
+# shogun-cdp-automation: cmd_475 で privategit only に変更 (upstream 混入リスク回避)
 
 # Python venv (explicit deny — whitelist patterns like LICENSE leak through !*/)
 .venv/
