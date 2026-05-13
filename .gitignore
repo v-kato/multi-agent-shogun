@@ -150,6 +150,8 @@
 !skills/shogun-screenshot/scripts/
 !skills/shogun-screenshot/scripts/*.sh
 !skills/shogun-screenshot/scripts/*.py
+# shogun-codd: cmd_475 で privategit only に変更 (upstream 混入リスク回避)
+# shogun-cdp-automation: cmd_475 で privategit only に変更 (upstream 混入リスク回避)
 
 # Python venv (explicit deny — whitelist patterns like LICENSE leak through !*/)
 .venv/
