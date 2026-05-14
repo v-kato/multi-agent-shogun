@@ -322,7 +322,14 @@ task:
   task_id: subtask_001
   parent_cmd: cmd_001
   bloom_level: L3        # L1-L3=Ashigaru, L4-L6=Gunshi
-  description: "Create hello1.md with content 'おはよう1'"
+  output_dir: tmp/cmd_001/     # 永続成果物（スクショ・ログ・再利用script）の保存先
+  description: |
+    Create hello1.md with content 'おはよう1'
+    
+    ## 成果物保存先
+    スクショ・検証ログ・再利用script は `output_dir` フィールドの path に保存。
+    純粋一時ファイル (中間draft等) は /tmp で可。
+    skill (shogun-cdp-automation 等) を呼ぶ場合は明示的に保存先指定すること。
   target_path: "/mnt/c/tools/multi-agent-shogun/hello1.md"
   echo_message: "🔥 足軽1号、先陣を切って参る！八刃一志！"
   status: assigned
@@ -333,6 +340,7 @@ task:
   task_id: subtask_003
   parent_cmd: cmd_001
   bloom_level: L6
+  output_dir: tmp/cmd_001/
   blocked_by: [subtask_001, subtask_002]
   description: "Integrate research results from ashigaru 1 and 2"
   target_path: "/mnt/c/tools/multi-agent-shogun/reports/integrated_report.md"
