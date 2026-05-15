@@ -1016,16 +1016,18 @@ except Exception:
 #   $1: recommended_model — get_recommended_model() の返り値
 #
 # 返り値:
-#   空き足軽ID (例: "ashigaru4") — 完全一致またはフォールバック
+#   空き足軽ID (例: "ashigaru4") — 完全一致または上位tierフォールバック (model-switch不要)
+#   "SWITCH:<agent_id>:<required_model>" — 下位tierフォールバック (呼出元でmodel-switch必要)
 #   全員ビジー → "QUEUE"
 #   エラー → "" (空文字)
 #
 # 使用例:
 #   agent=$(find_agent_for_model "claude-sonnet-4-6")
 #   case "$agent" in
-#     QUEUE) echo "待機キューに積む" ;;
-#     "")    echo "エラー" ;;
-#     *)     echo "足軽: $agent に振る（karo.mdがCLI切り替えを判断）" ;;
+#     QUEUE)    echo "待機キューに積む" ;;
+#     SWITCH:*) echo "下位tier: model-switch後に割り当て" ;;
+#     "")       echo "エラー" ;;
+#     *)        echo "足軽: $agent に振る（上位tierも含む）" ;;
 #   esac
 find_agent_for_model() {
     local recommended_model="$1"
@@ -1106,52 +1108,100 @@ except Exception:
         fi
     done
 
-    # フェーズ2: 完全一致が全員ビジー → 任意のアイドル足軽にフォールバック
-    # 殿の方針: 「Codex 5.3が欲しくて Claude Code しか空いていなければ Claude Code で可」
-    # kill/restart は絶対しない。アイドルペインを再利用する。
-    local all_agents
-    all_agents=$("$CLI_ADAPTER_PROJECT_ROOT/.venv/bin/python3" -c "
-import yaml
+    # フェーズ2: 完全一致が全員ビジー → tier-aware フォールバック (f513fcc 復元 cmd_486)
+    # Phase 2: 上位tier (agent_bloom > req_bloom) → model-switch不要・そのまま返す
+    # Phase 3: 下位tier (0 < agent_bloom < req_bloom) → SWITCH:<agent_id>:<required_model>
+    # 殿確定 Q1=(a): 上位tier昇格を許可 (全 busy 時の上位 fallback は品質担保のため許可)
+    local req_bloom
+    req_bloom=$("$CLI_ADAPTER_PROJECT_ROOT/.venv/bin/python3" -c "
+import yaml, sys
+try:
+    with open('${settings}') as f:
+        cfg = yaml.safe_load(f) or {}
+    tiers = cfg.get('capability_tiers')
+    if not tiers or not isinstance(tiers, dict):
+        print('6'); sys.exit(0)
+    spec = tiers.get('${recommended_model}')
+    if not spec or not isinstance(spec, dict):
+        print('6'); sys.exit(0)
+    mb = spec.get('max_bloom', 6)
+    print(mb if isinstance(mb, int) and 1 <= mb <= 6 else 6)
+except Exception:
+    print('6')
+" 2>/dev/null)
+    [[ -z "$req_bloom" ]] && req_bloom=6
 
+    local all_agents_info
+    all_agents_info=$("$CLI_ADAPTER_PROJECT_ROOT/.venv/bin/python3" -c "
+import yaml
 try:
     with open('${settings}') as f:
         cfg = yaml.safe_load(f) or {}
     agents = cfg.get('cli', {}).get('agents', {})
-    results = [k for k in agents if k.startswith('ashigaru')]
-    results.sort(key=lambda x: int(x.replace('ashigaru', '')) if x.replace('ashigaru', '').isdigit() else 99)
-    print(' '.join(results))
+    tiers = cfg.get('capability_tiers', {})
+    results = []
+    for agent_id, spec in agents.items():
+        if not agent_id.startswith('ashigaru'):
+            continue
+        if not isinstance(spec, dict):
+            continue
+        amodel = spec.get('model', '')
+        if amodel == '${recommended_model}':
+            continue
+        tier_spec = tiers.get(amodel, {})
+        ab = tier_spec.get('max_bloom', 6) if isinstance(tier_spec, dict) else 6
+        results.append((agent_id, amodel, ab))
+    results.sort(key=lambda x: int(x[0].replace('ashigaru', '')) if x[0].replace('ashigaru', '').isdigit() else 99)
+    for r in results:
+        print(f'{r[0]} {r[1]} {r[2]}')
 except Exception:
     pass
 " 2>/dev/null)
 
-    local fallback
-    for fallback in $all_agents; do
-        # 既に candidates でチェック済みはスキップ
-        if [[ " $candidates " == *" $fallback "* ]]; then
-            continue
-        fi
-
-        local fb_pane
-        fb_pane=$(tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{@agent_id}' 2>/dev/null \
-            | awk -v agent="$fallback" '$2 == agent {print $1}' | head -1)
-
-        if [[ -z "$fb_pane" ]]; then
-            # tmuxセッションなし（テスト環境）→ フォールバック候補を返す
-            echo "$fallback"
-            return 0
-        fi
-
-        if declare -f agent_is_busy_check >/dev/null 2>&1; then
-            agent_is_busy_check "$fb_pane" 2>/dev/null
-            local fb_rc=$?
-            if [[ $fb_rc -eq 1 ]]; then
-                echo "$fallback"
+    # Phase 2: 上位tier (agent_bloom > req_bloom) → そのまま返す
+    local fb_agent fb_model fb_bloom
+    while read -r fb_agent fb_model fb_bloom; do
+        [[ -z "$fb_agent" ]] && continue
+        if [[ "$fb_bloom" -gt "$req_bloom" ]] 2>/dev/null; then
+            local fb_pane
+            fb_pane=$(tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{@agent_id}' 2>/dev/null \
+                | awk -v agent="$fb_agent" '$2 == agent {print $1}' | head -1)
+            if [[ -z "$fb_pane" ]]; then
+                echo "$fb_agent"
                 return 0
             fi
+            if declare -f agent_is_busy_check >/dev/null 2>&1; then
+                agent_is_busy_check "$fb_pane" 2>/dev/null
+                if [[ $? -eq 1 ]]; then
+                    echo "$fb_agent"
+                    return 0
+                fi
+            fi
         fi
-    done
+    done <<< "$all_agents_info"
 
-    # 全足軽ビジー → キュー待ち
+    # Phase 3: 下位tier (0 < agent_bloom < req_bloom) → SWITCH形式
+    while read -r fb_agent fb_model fb_bloom; do
+        [[ -z "$fb_agent" ]] && continue
+        if [[ "$fb_bloom" -gt 0 && "$fb_bloom" -lt "$req_bloom" ]] 2>/dev/null; then
+            local fb_pane
+            fb_pane=$(tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{@agent_id}' 2>/dev/null \
+                | awk -v agent="$fb_agent" '$2 == agent {print $1}' | head -1)
+            if [[ -z "$fb_pane" ]]; then
+                echo "SWITCH:${fb_agent}:${recommended_model}"
+                return 0
+            fi
+            if declare -f agent_is_busy_check >/dev/null 2>&1; then
+                agent_is_busy_check "$fb_pane" 2>/dev/null
+                if [[ $? -eq 1 ]]; then
+                    echo "SWITCH:${fb_agent}:${recommended_model}"
+                    return 0
+                fi
+            fi
+        fi
+    done <<< "$all_agents_info"
+
+    # Phase 4: 全足軽ビジー → キュー待ち
     echo "QUEUE"
     return 0
 }

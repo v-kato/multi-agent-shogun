@@ -94,10 +94,15 @@ workflow:
              # 全足軽ビジー → タスクを保留キューに積む
              # 次の足軽完了時に再試行
              ;;
+           SWITCH:*)
+             # 下位tierアイドル足軽 → model-switch後に割り当て
+             # target_id="${target_agent#SWITCH:}"; target_id="${target_id%:*}"
+             # switch_model="${target_agent##*:}"
+             # shogun-model-switchスキルで切替後、inbox_writeで割当て
+             ;;
            ashigaru*)
-             # 現在割り当て予定の足軽 vs target_agent が異なる場合:
+             # 完全一致または上位tierアイドル → そのまま割り当て
              # target_agent が異なるCLI → アイドルなのでCLI再起動OK（kill禁止はビジーペインのみ）
-             # target_agent と割り当て予定が同じ → そのまま
              ;;
          esac
 

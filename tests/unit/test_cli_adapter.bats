@@ -125,6 +125,54 @@ YAML
 cli:
   default: kimi
 YAML
+
+    # find_agent_for_model T-1: 完全一致回帰 (sonnet idle → ashigaru2)
+    cat > "${TEST_TMP}/settings_tier_t1.yaml" << 'YAML'
+capability_tiers:
+  claude-sonnet-4-6:
+    max_bloom: 5
+  claude-opus-4-6:
+    max_bloom: 6
+cli:
+  default: claude
+  agents:
+    ashigaru1:
+      type: claude
+      model: claude-opus-4-6
+    ashigaru2:
+      type: claude
+      model: claude-sonnet-4-6
+YAML
+
+    # find_agent_for_model T-2: 上位tierフォールバック (sonnet不在・opus idle → ashigaru1)
+    cat > "${TEST_TMP}/settings_tier_t2.yaml" << 'YAML'
+capability_tiers:
+  claude-sonnet-4-6:
+    max_bloom: 5
+  claude-opus-4-6:
+    max_bloom: 6
+cli:
+  default: claude
+  agents:
+    ashigaru1:
+      type: claude
+      model: claude-opus-4-6
+YAML
+
+    # find_agent_for_model T-3: 下位tierフォールバック (sonnet/opus不在・haiku idle → SWITCH)
+    cat > "${TEST_TMP}/settings_tier_t3.yaml" << 'YAML'
+capability_tiers:
+  claude-sonnet-4-6:
+    max_bloom: 5
+  claude-haiku-4-5-20251001:
+    max_bloom: 2
+cli:
+  default: claude
+  agents:
+    ashigaru3:
+      type: claude
+      model: claude-haiku-4-5-20251001
+YAML
 }
 
 teardown() {
@@ -757,4 +805,26 @@ YAML
     result=$(build_cli_command "ashigaru5")
     [[ "$result" != MAX_THINKING_TOKENS* ]]
     [[ "$result" == codex* ]]
+}
+
+# =============================================================================
+# find_agent_for_model テスト (T-1/T-2/T-3: tier-aware fallback f513fcc 復元)
+# =============================================================================
+
+@test "find_agent_for_model T-1: sonnet idle → 完全一致 ashigaru2 返却 (regression)" {
+    load_adapter_with "${TEST_TMP}/settings_tier_t1.yaml"
+    result=$(find_agent_for_model "claude-sonnet-4-6")
+    [ "$result" = "ashigaru2" ]
+}
+
+@test "find_agent_for_model T-2: sonnet全員busy・opus idle → 上位tier ashigaru1 返却 (SWITCH不要)" {
+    load_adapter_with "${TEST_TMP}/settings_tier_t2.yaml"
+    result=$(find_agent_for_model "claude-sonnet-4-6")
+    [ "$result" = "ashigaru1" ]
+}
+
+@test "find_agent_for_model T-3: sonnet/opus全員busy・haiku idle → SWITCH:ashigaru3:claude-sonnet-4-6" {
+    load_adapter_with "${TEST_TMP}/settings_tier_t3.yaml"
+    result=$(find_agent_for_model "claude-sonnet-4-6")
+    [ "$result" = "SWITCH:ashigaru3:claude-sonnet-4-6" ]
 }
