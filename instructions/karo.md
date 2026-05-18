@@ -91,13 +91,19 @@ workflow:
       4. ルーティング判定:
          case "$target_agent" in
            QUEUE)
-             # 全足軽ビジー → タスクを保留キューに積む
+             # 全足軽ビジー (適切tier + 上位 fallback 含め全員busy) → タスクを保留キューに積む
              # 次の足軽完了時に再試行
              ;;
+           SWITCH:*)
+             # Phase 3: 下位tierアイドル足軽 → model-switch後に割り当て
+             # target_id="${target_agent#SWITCH:}"; target_id="${target_id%:*}"
+             # switch_model="${target_agent##*:}"
+             # shogun-model-switchスキルで切替後、inbox_writeで割当て
+             ;;
            ashigaru*)
-             # 現在割り当て予定の足軽 vs target_agent が異なる場合:
+             # Phase 1 (完全一致) または Phase 2 (上位tier fallback) → そのまま割り当て
+             # Phase 2: 適切tier全員busy時のみ上位tier (Opus等) idle → model-switch不要で代替実行 (殿確定・品質担保)
              # target_agent が異なるCLI → アイドルなのでCLI再起動OK（kill禁止はビジーペインのみ）
-             # target_agent と割り当て予定が同じ → そのまま
              ;;
          esac
 
