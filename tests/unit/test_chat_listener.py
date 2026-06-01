@@ -24,6 +24,8 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
 from chat_listener import (
+    acquire_pid_lock,
+    release_pid_lock,
     atomic_yaml_append,
     build_inbox_entry,
     check_allowlist,
@@ -438,3 +440,47 @@ def _make_pubsub_message(
         "ce-time": "2026-06-01T02:00:00Z",
     }
     return msg
+
+
+# ── PID file 単一起動保証 ────────────────────────────────────────────────────
+
+class TestPidLock:
+    def test_acquire_creates_pid_file(self, tmp_path):
+        """PID file が存在しないとき作成成功・自プロセス PID が書き込まれる"""
+        pid_file = str(tmp_path / "test.pid")
+        acquire_pid_lock(pid_file)
+        assert Path(pid_file).exists()
+        assert int(Path(pid_file).read_text().strip()) == os.getpid()
+        release_pid_lock(pid_file)
+
+    def test_acquire_rejects_running_pid(self, tmp_path):
+        """稼働中の PID が書かれている場合は SystemExit(1) で拒否"""
+        pid_file = str(tmp_path / "test.pid")
+        Path(pid_file).write_text(str(os.getpid()))  # 自身のPID (稼働中)
+        with pytest.raises(SystemExit) as exc:
+            acquire_pid_lock(pid_file)
+        assert exc.value.code == 1
+
+    def test_acquire_overwrites_stale_pid(self, tmp_path):
+        """存在しない PID (stale) なら上書きして起動成功"""
+        pid_file = str(tmp_path / "test.pid")
+        Path(pid_file).write_text("9999999")  # stale PID
+        acquire_pid_lock(pid_file)  # 拒否されないこと
+        assert int(Path(pid_file).read_text().strip()) == os.getpid()
+        release_pid_lock(pid_file)
+
+    def test_release_removes_pid_file(self, tmp_path):
+        """release_pid_lock で PID file が削除される"""
+        pid_file = str(tmp_path / "test.pid")
+        Path(pid_file).write_text(str(os.getpid()))
+        release_pid_lock(pid_file)
+        assert not Path(pid_file).exists()
+
+    def test_double_launch_rejected(self, tmp_path):
+        """二重起動: 同じ PID file に稼働中 PID → exit 1"""
+        pid_file = str(tmp_path / "double.pid")
+        acquire_pid_lock(pid_file)  # 1回目: 正常取得
+        with pytest.raises(SystemExit) as exc:
+            acquire_pid_lock(pid_file)  # 2回目: 拒否
+        assert exc.value.code == 1
+        release_pid_lock(pid_file)

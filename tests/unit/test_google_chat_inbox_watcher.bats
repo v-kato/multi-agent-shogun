@@ -234,3 +234,73 @@ YAML
     # 家老が確認すべきファイルパスが含まれること
     [[ "$log" == *"google_chat_inbox.yaml"* ]]
 }
+
+@test "T-GCW-013: PID file — 二重起動を exit 1 で拒否する" {
+    # 既存 PID file に稼働中のプロセス PID を書く (このテストプロセス自身)
+    local pid_file
+    pid_file=$(mktemp)
+    echo $$ > "$pid_file"
+
+    # setup が export した __GOOGLE_CHAT_INBOX_WATCHER_TESTING__=1 を空にして非テストモードで実行
+    run env __GOOGLE_CHAT_INBOX_WATCHER_TESTING__="" \
+        GOOGLE_CHAT_WATCHER_PID_FILE="$pid_file" \
+        bash "$WATCHER_SCRIPT"
+
+    rm -f "$pid_file"
+
+    # exit 1 で拒否されること
+    [ "$status" -eq 1 ]
+}
+
+@test "T-GCW-014: debounce — 同じ件数では繰り返し通知しない" {
+    cat > "$GOOGLE_CHAT_INBOX" << 'YAML'
+inbox:
+  - message_id: msg_001
+    text: "未処理メッセージ"
+    processed: false
+    rejected: false
+YAML
+    # 1回目: 通知される (_LAST_NOTIFIED_COUNT=-1 → 1 に変化)
+    check_and_notify
+    inbox_write_was_called
+
+    # 2回目: 同じ件数 (1) → スキップ
+    check_and_notify
+
+    # inbox_write は1回のみ
+    local call_count
+    call_count=$(wc -l < "$TEST_TMP/inbox_write_calls.log" 2>/dev/null || echo 0)
+    [ "$call_count" -eq 1 ]
+}
+
+@test "T-GCW-015: debounce — 件数が増えた場合は再通知する" {
+    cat > "$GOOGLE_CHAT_INBOX" << 'YAML'
+inbox:
+  - message_id: msg_001
+    text: "未処理1"
+    processed: false
+    rejected: false
+YAML
+    # 1回目: 1件通知
+    check_and_notify
+
+    # 2件に増やす
+    cat > "$GOOGLE_CHAT_INBOX" << 'YAML'
+inbox:
+  - message_id: msg_001
+    text: "未処理1"
+    processed: false
+    rejected: false
+  - message_id: msg_002
+    text: "未処理2"
+    processed: false
+    rejected: false
+YAML
+    # 2回目: 2件 → 件数変化のため通知
+    check_and_notify
+
+    # 2回通知されること
+    local call_count
+    call_count=$(wc -l < "$TEST_TMP/inbox_write_calls.log" 2>/dev/null || echo 0)
+    [ "$call_count" -eq 2 ]
+}

@@ -31,8 +31,49 @@ from pathlib import Path
 
 import yaml
 
+# デフォルト PID file パス
+DEFAULT_PID_FILE = "/tmp/chat_listener.pid"
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def acquire_pid_lock(pid_file: str) -> None:
+    """
+    単一起動保証: PID file による二重起動防止。
+    既存 PID が稼働中なら exit(1)。stale PID file は上書き。
+    """
+    pid_path = Path(pid_file)
+    if pid_path.exists():
+        try:
+            existing_pid = int(pid_path.read_text().strip())
+            os.kill(existing_pid, 0)  # signal 0 = 生死確認のみ
+            logger.error(
+                "二重起動を拒否: PID %d が稼働中 (PID file: %s)。"
+                "既存プロセスを停止してから再起動してください。",
+                existing_pid,
+                pid_file,
+            )
+            sys.exit(1)
+        except ValueError:
+            logger.warning("PID file の内容が不正。上書きします: %s", pid_file)
+        except ProcessLookupError:
+            logger.info("stale PID file を上書き (PID: %s)", pid_path.read_text().strip())
+        except PermissionError:
+            logger.error("PID file の確認に失敗 (PermissionError)。二重起動を拒否します。")
+            sys.exit(1)
+
+    pid_path.write_text(str(os.getpid()))
+    logger.info("PID file 作成: %s (PID=%d)", pid_file, os.getpid())
+
+
+def release_pid_lock(pid_file: str) -> None:
+    """PID file 削除 (atexit / finally で呼ぶ)"""
+    try:
+        Path(pid_file).unlink(missing_ok=True)
+        logger.info("PID file 削除: %s", pid_file)
+    except Exception as e:
+        logger.warning("PID file 削除失敗: %s (%s)", pid_file, e)
 
 
 def load_config(path: str) -> dict:
@@ -323,7 +364,7 @@ def process_message(
     sender = chat_message.get("sender", {})
     ok, reason = check_allowlist(sender, allowlist_config)
     if not ok:
-        logger.info("allowlist 拒否: reason=%s sender_id=%s", reason, sender.get("name", "?"))
+        logger.info("allowlist 拒否: reason=%s sender_id=%s sender_type=%s", reason, sender.get("name", "?"), sender.get("type", "?"))
         entry = build_inbox_entry(
             message_id=message_id,
             delivery_id=delivery_id,
@@ -365,7 +406,15 @@ def main():
     parser.add_argument("--inbox", default="queue/inbox/google_chat_inbox.yaml")
     parser.add_argument("--max-messages", type=int, default=10)
     parser.add_argument("--once", action="store_true", help="1 回 pull して終了 (デバッグ用)")
+    parser.add_argument("--pid-file", default=DEFAULT_PID_FILE, help="PID file パス (単一起動保証)")
+    parser.add_argument("--no-pid-file", action="store_true", help="PID file を使わない (テスト用)")
     args = parser.parse_args()
+
+    # ★単一起動保証
+    import atexit
+    if not args.no_pid_file:
+        acquire_pid_lock(args.pid_file)
+        atexit.register(release_pid_lock, args.pid_file)
 
     cfg = load_config(args.config)
     gc_cfg = cfg.get("google_chat", {})

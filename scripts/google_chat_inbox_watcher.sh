@@ -30,6 +30,21 @@ if [ "${__GOOGLE_CHAT_INBOX_WATCHER_TESTING__:-}" != "1" ]; then
         printf 'inbox: []\n' > "$GOOGLE_CHAT_INBOX"
     fi
 
+    # ★単一起動保証 (PID file)
+    _WATCHER_PID_FILE="${GOOGLE_CHAT_WATCHER_PID_FILE:-/tmp/google_chat_inbox_watcher.pid}"
+    if [ -f "$_WATCHER_PID_FILE" ]; then
+        _existing_pid=$(cat "$_WATCHER_PID_FILE")
+        if kill -0 "$_existing_pid" 2>/dev/null; then
+            echo "[google_chat_inbox_watcher] ERROR: 二重起動を拒否 (PID=$_existing_pid 稼働中)。既存プロセスを停止してから再起動してください。" >&2
+            exit 1
+        else
+            echo "[google_chat_inbox_watcher] stale PID file を上書き (PID=$_existing_pid)" >&2
+        fi
+    fi
+    echo $$ > "$_WATCHER_PID_FILE"
+    trap 'rm -f "$_WATCHER_PID_FILE"' EXIT
+    echo "[$(date)] PID file 作成: $_WATCHER_PID_FILE (PID=$$)" >&2
+
     echo "[$(date)] google_chat_inbox_watcher started — inbox: $GOOGLE_CHAT_INBOX" >&2
 fi
 
@@ -86,14 +101,23 @@ notify_karo() {
     echo "[$(date)] karo へ通知: ${count} 件未処理" >&2
 }
 
-# ─── 変更検知 & 通知 ───
+# ─── 変更検知 & 通知 (debounced) ───
+# 同じ件数で繰り返し通知しない: count が変化したときのみ通知
+_LAST_NOTIFIED_COUNT=-1
+
 check_and_notify() {
     local count
     count=$(count_unprocessed)
     if [ "${count:-0}" -gt 0 ] 2>/dev/null; then
-        notify_karo "$count"
+        if [ "$count" != "$_LAST_NOTIFIED_COUNT" ]; then
+            notify_karo "$count"
+            _LAST_NOTIFIED_COUNT="$count"
+        else
+            echo "[$(date)] 未処理 ${count} 件 — 前回通知済みのためスキップ (debounce)" >&2
+        fi
     else
         echo "[$(date)] 未処理 0 件 — 通知スキップ" >&2
+        _LAST_NOTIFIED_COUNT=0
     fi
 }
 
