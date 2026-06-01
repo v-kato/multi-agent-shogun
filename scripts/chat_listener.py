@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 chat_listener.py — Google Chat Pub/Sub pull → queue/inbox/google_chat_inbox.yaml
-cmd_506 Batch B / phase_h_addendum 反映
+cmd_506 Batch B / phase_h_addendum 反映 / G-2 ack 冪等化
 
 使用方法:
   python3 scripts/chat_listener.py \
@@ -13,8 +13,9 @@ cmd_506 Batch B / phase_h_addendum 反映
   2. ★ノイズフィルタ (ce-subject + ce-type) — allowlist 前最優先
   3. デコード (message.data bytes → base64? → UTF-8 JSON)
   4. スキーマ検証 + allowlist + dedup
-  5. YAML atomic append (flock + temp + rename)
+  5. YAML atomic append_if_absent (flock + temp + rename・同一 message_id 二重書込防止)
   6. 永続書込成功後に ack (書込失敗時は ack しない)
+     G-2: 1 message ごとに try/process/ack 完結 (batch ack 撤廃)
 """
 
 import argparse
@@ -26,6 +27,7 @@ import os
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,30 +40,64 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class ProcessResult:
+    """1 message の処理結果。main() が ack 判断に使う。"""
+    status: str          # "accepted" | "rejected:{reason}" | "error:{msg}"
+    should_ack: bool     # True = Pub/Sub acknowledge を実行すべき
+    appended: bool       # True = 新規エントリが inbox に追記された
+    message_id: str      # spaces/.../messages/...
+    reason: str          # reject/error reason
+
+
 def acquire_pid_lock(pid_file: str) -> None:
     """
     単一起動保証: PID file による二重起動防止。
-    既存 PID が稼働中なら exit(1)。stale PID file は上書き。
+    既存 PID が稼働中なら exit(1)。stale / 不正 PID file は上書き。
+    G-2: 空・非数値・複数行 PID も安全に stale 扱い。/proc cmdline で script 名確認。
     """
     pid_path = Path(pid_file)
     if pid_path.exists():
+        raw = pid_path.read_text()
+        first_line = raw.strip().splitlines()[0] if raw.strip() else ""
         try:
-            existing_pid = int(pid_path.read_text().strip())
-            os.kill(existing_pid, 0)  # signal 0 = 生死確認のみ
-            logger.error(
-                "二重起動を拒否: PID %d が稼働中 (PID file: %s)。"
-                "既存プロセスを停止してから再起動してください。",
-                existing_pid,
-                pid_file,
-            )
-            sys.exit(1)
-        except ValueError:
-            logger.warning("PID file の内容が不正。上書きします: %s", pid_file)
-        except ProcessLookupError:
-            logger.info("stale PID file を上書き (PID: %s)", pid_path.read_text().strip())
-        except PermissionError:
-            logger.error("PID file の確認に失敗 (PermissionError)。二重起動を拒否します。")
-            sys.exit(1)
+            existing_pid = int(first_line)
+        except (ValueError, IndexError):
+            logger.warning("PID file の内容が不正 (空/非数値/複数行)。上書きします: %s", pid_file)
+            existing_pid = None
+
+        if existing_pid is not None:
+            try:
+                os.kill(existing_pid, 0)
+                # PID reuse 対策: /proc/$pid/cmdline でスクリプト名を確認
+                cmdline_path = f"/proc/{existing_pid}/cmdline"
+                script_match = False
+                try:
+                    with open(cmdline_path, "rb") as f:
+                        cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", errors="replace")
+                    script_match = "chat_listener" in cmdline
+                except (OSError, IOError):
+                    # /proc が読めない環境では kill -0 の結果を信頼
+                    script_match = True
+
+                if script_match:
+                    logger.error(
+                        "二重起動を拒否: PID %d が稼働中 (PID file: %s)。"
+                        "既存プロセスを停止してから再起動してください。",
+                        existing_pid,
+                        pid_file,
+                    )
+                    sys.exit(1)
+                else:
+                    logger.info(
+                        "PID=%d は別プロセス (cmdline 不一致)。stale PID file を上書き: %s",
+                        existing_pid, pid_file
+                    )
+            except ProcessLookupError:
+                logger.info("stale PID file を上書き (PID: %s)", existing_pid)
+            except PermissionError:
+                logger.error("PID file の確認に失敗 (PermissionError)。二重起動を拒否します。")
+                sys.exit(1)
 
     pid_path.write_text(str(os.getpid()))
     logger.info("PID file 作成: %s (PID=%d)", pid_file, os.getpid())
@@ -273,12 +309,15 @@ def build_inbox_entry(
     }
 
 
-def atomic_yaml_append(inbox_path: str, entry: dict) -> None:
+def atomic_yaml_append_if_absent(inbox_path: str, entry: dict) -> bool:
     """
-    flock + temp file + rename による atomic YAML append
-    トップキー: inbox
+    flock + temp file + rename による atomic YAML append。
+    flock 取得後に既存 message_id を再確認し、重複時はファイルを書き換えない。
+    返り値: True = 新規追記した / False = 既に存在していた (重複)
     書込失敗時は例外を送出 (呼び出し元で ack しないこと)
+    G-2: append_if_absent で同一 message_id の二重書込を防ぐ
     """
+    message_id = entry.get("message_id", "")
     p = Path(inbox_path)
     p.parent.mkdir(parents=True, exist_ok=True)
 
@@ -295,6 +334,13 @@ def atomic_yaml_append(inbox_path: str, entry: dict) -> None:
                 data = {}
 
             entries = data.get("inbox", []) or []
+
+            # flock 取得後に再確認 (並行 listener の二重 append 防止)
+            existing_ids = {e.get("message_id") for e in entries if e.get("message_id")}
+            if message_id and message_id in existing_ids:
+                logger.info("append_if_absent: 既存 message_id のため append スキップ: %s", message_id)
+                return False
+
             entries.append(entry)
             data["inbox"] = entries
 
@@ -310,10 +356,16 @@ def atomic_yaml_append(inbox_path: str, entry: dict) -> None:
 
             os.replace(tmp_path, inbox_path)
             tmp_path = None
+            return True
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
             fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def atomic_yaml_append(inbox_path: str, entry: dict) -> None:
+    """後方互換ラッパー: append_if_absent を呼ぶ。テスト互換性のため残す。"""
+    atomic_yaml_append_if_absent(inbox_path, entry)
 
 
 def process_message(
@@ -323,11 +375,15 @@ def process_message(
     allowlist_config: dict,
     inbox_path: str,
     dedup_cache: set,
-) -> str:
+) -> ProcessResult:
     """
-    1 メッセージを処理。
-    返り値: "accepted" | "rejected:{reason}" | "error:{msg}"
-    ack 判断は呼び出し元が行う。
+    1 メッセージを処理。ProcessResult を返す。
+    G-2: should_ack を明示し、batch ack ではなく 1 message ごとに ack を判断する。
+
+    should_ack=True のケース:
+      accepted / rejected:* / duplicate_message / noise / malformed / message_id_missing
+    should_ack=False のケース:
+      YAML 書込例外 / permission error / 予期しない例外
     """
     attributes = dict(pubsub_message.attributes)
     delivery_id = pubsub_message.message_id
@@ -338,14 +394,26 @@ def process_message(
     ok, reason = check_noise_filter(attributes, expected_subject, expected_type)
     if not ok:
         logger.info("ノイズフィルタ拒否: reason=%s delivery_id=%s", reason, delivery_id)
-        return f"rejected:{reason}"
+        return ProcessResult(
+            status=f"rejected:{reason}",
+            should_ack=True,
+            appended=False,
+            message_id="",
+            reason=reason,
+        )
 
     # Step 2: デコード
     try:
         payload = decode_payload(bytes(pubsub_message.data))
     except ValueError as e:
         logger.warning("デコードエラー: %s delivery_id=%s", e, delivery_id)
-        return "rejected:malformed_payload"
+        return ProcessResult(
+            status="rejected:malformed_payload",
+            should_ack=True,
+            appended=False,
+            message_id="",
+            reason="malformed_payload",
+        )
 
     # Step 3: Chat message 抽出 + message_id 検証
     chat_message = extract_chat_message(payload)
@@ -353,18 +421,33 @@ def process_message(
 
     if not message_id:
         logger.warning("message.name 欠落 delivery_id=%s", delivery_id)
-        return "rejected:message_id_missing"
+        return ProcessResult(
+            status="rejected:message_id_missing",
+            should_ack=True,
+            appended=False,
+            message_id="",
+            reason="message_id_missing",
+        )
 
     # Step 4: dedup (message.name が主要 dedup key)
     if message_id in dedup_cache:
         logger.info("重複: message_id=%s delivery_id=%s", message_id, delivery_id)
-        return "rejected:duplicate_message"
+        return ProcessResult(
+            status="rejected:duplicate_message",
+            should_ack=True,
+            appended=False,
+            message_id=message_id,
+            reason="duplicate_message",
+        )
 
     # Step 5: allowlist 検証
     sender = chat_message.get("sender", {})
     ok, reason = check_allowlist(sender, allowlist_config)
     if not ok:
-        logger.info("allowlist 拒否: reason=%s sender_id=%s sender_type=%s", reason, sender.get("name", "?"), sender.get("type", "?"))
+        logger.info(
+            "allowlist 拒否: reason=%s sender_id=%s sender_type=%s",
+            reason, sender.get("name", "?"), sender.get("type", "?")
+        )
         entry = build_inbox_entry(
             message_id=message_id,
             delivery_id=delivery_id,
@@ -377,9 +460,26 @@ def process_message(
             rejected=True,
             reject_reason=reason,
         )
-        atomic_yaml_append(inbox_path, entry)
-        dedup_cache.add(message_id)
-        return f"rejected:{reason}"
+        try:
+            appended = atomic_yaml_append_if_absent(inbox_path, entry)
+            if appended:
+                dedup_cache.add(message_id)
+        except Exception as e:
+            logger.error("inbox 書込失敗 (allowlist reject): %s", e)
+            return ProcessResult(
+                status=f"error:yaml_write_failed",
+                should_ack=False,
+                appended=False,
+                message_id=message_id,
+                reason=str(e),
+            )
+        return ProcessResult(
+            status=f"rejected:{reason}",
+            should_ack=True,
+            appended=appended,
+            message_id=message_id,
+            reason=reason,
+        )
 
     # Step 6: inbox 追記 (永続書込成功後に ack)
     entry = build_inbox_entry(
@@ -392,15 +492,35 @@ def process_message(
         chat_message=chat_message,
         payload=payload,
     )
-    atomic_yaml_append(inbox_path, entry)
-    dedup_cache.add(message_id)
+    try:
+        appended = atomic_yaml_append_if_absent(inbox_path, entry)
+        if appended:
+            dedup_cache.add(message_id)
+            logger.info("inbox 追記: message_id=%s", message_id)
+        else:
+            logger.info("append_if_absent: 重複スキップ (inbox 内 flock 確認): %s", message_id)
+            dedup_cache.add(message_id)
+    except Exception as e:
+        logger.error("inbox 書込失敗: %s delivery_id=%s", e, delivery_id)
+        return ProcessResult(
+            status=f"error:yaml_write_failed",
+            should_ack=False,
+            appended=False,
+            message_id=message_id,
+            reason=str(e),
+        )
 
-    logger.info("inbox 追記: message_id=%s", message_id)
-    return "accepted"
+    return ProcessResult(
+        status="accepted",
+        should_ack=True,
+        appended=appended,
+        message_id=message_id,
+        reason="",
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Google Chat Pub/Sub pull listener (cmd_506 Batch B)")
+    parser = argparse.ArgumentParser(description="Google Chat Pub/Sub pull listener (cmd_506 Batch B / G-2)")
     parser.add_argument("--config", default="config/google-chat-events-config.yaml")
     parser.add_argument("--credentials", default="config/google-chat-events.json")
     parser.add_argument("--inbox", default="queue/inbox/google_chat_inbox.yaml")
@@ -460,27 +580,34 @@ def main():
                 time.sleep(5)
                 continue
 
-            ack_ids = []
+            # G-2: 1 message ごとに try/process/ack 完結 (batch ack 撤廃)
             for received in response.received_messages:
-                result = process_message(
-                    received.message,
-                    expected_subject=expected_subject,
-                    expected_type=expected_type,
-                    allowlist_config=allowlist_config,
-                    inbox_path=args.inbox,
-                    dedup_cache=dedup_cache,
-                )
-                if not result.startswith("error:"):
-                    ack_ids.append(received.ack_id)
+                try:
+                    result = process_message(
+                        received.message,
+                        expected_subject=expected_subject,
+                        expected_type=expected_type,
+                        allowlist_config=allowlist_config,
+                        inbox_path=args.inbox,
+                        dedup_cache=dedup_cache,
+                    )
+                except Exception as e:
+                    logger.error("process_message 例外: %s ack_id=%s", e, received.ack_id)
+                    continue
 
-            if ack_ids:
-                subscriber.acknowledge(
-                    request={
-                        "subscription": subscription_path,
-                        "ack_ids": ack_ids,
-                    }
-                )
-                logger.info("ack: %d 件", len(ack_ids))
+                if result.should_ack:
+                    try:
+                        subscriber.acknowledge(
+                            request={
+                                "subscription": subscription_path,
+                                "ack_ids": [received.ack_id],
+                            }
+                        )
+                        logger.info("ack: %s status=%s", result.message_id or received.message.message_id, result.status)
+                    except Exception as e:
+                        logger.error("ack 失敗 (次 poll で再配信): %s", e)
+                else:
+                    logger.warning("ack スキップ (書込失敗): %s", result.reason)
 
             if args.once:
                 break

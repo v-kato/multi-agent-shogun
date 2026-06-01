@@ -24,9 +24,11 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
 from chat_listener import (
+    ProcessResult,
     acquire_pid_lock,
     release_pid_lock,
     atomic_yaml_append,
+    atomic_yaml_append_if_absent,
     build_inbox_entry,
     check_allowlist,
     check_noise_filter,
@@ -314,7 +316,8 @@ class TestProcessMessage:
 
         result = process_message(msg, SUBJECT, TYPE_CREATED, ALLOWLIST, inbox_path, dedup)
 
-        assert result == "accepted"
+        assert result.status == "accepted"
+        assert result.should_ack is True
         cache = load_inbox_dedups(inbox_path)
         assert "spaces/AAA/messages/001" in cache
 
@@ -328,7 +331,8 @@ class TestProcessMessage:
 
         result = process_message(msg, SUBJECT, TYPE_CREATED, ALLOWLIST, inbox_path, dedup)
 
-        assert result == "rejected:wrong_subject"
+        assert result.status == "rejected:wrong_subject"
+        assert result.should_ack is True
         # ノイズフィルタで弾いたので inbox には書かない
         assert not Path(inbox_path).exists()
 
@@ -342,7 +346,8 @@ class TestProcessMessage:
 
         result = process_message(msg, SUBJECT, TYPE_CREATED, ALLOWLIST, inbox_path, dedup)
 
-        assert result == "rejected:unsupported_event_type"
+        assert result.status == "rejected:unsupported_event_type"
+        assert result.should_ack is True
         assert not Path(inbox_path).exists()
 
     def test_rejected_duplicate(self, tmp_path):
@@ -356,7 +361,8 @@ class TestProcessMessage:
 
         result = process_message(msg, SUBJECT, TYPE_CREATED, ALLOWLIST, inbox_path, dedup)
 
-        assert result == "rejected:duplicate_message"
+        assert result.status == "rejected:duplicate_message"
+        assert result.should_ack is True
 
     def test_rejected_not_allowlisted(self, tmp_path):
         inbox_path = str(tmp_path / "google_chat_inbox.yaml")
@@ -368,7 +374,8 @@ class TestProcessMessage:
 
         result = process_message(msg, SUBJECT, TYPE_CREATED, ALLOWLIST, inbox_path, dedup)
 
-        assert result == "rejected:sender_not_allowlisted"
+        assert result.status == "rejected:sender_not_allowlisted"
+        assert result.should_ack is True
         # allowlist 拒否でも inbox に rejected=true で残す
         cache = load_inbox_dedups(inbox_path)
         assert "spaces/AAA/messages/001" in cache
@@ -385,7 +392,7 @@ class TestProcessMessage:
 
         result = process_message(msg, SUBJECT, TYPE_CREATED, ALLOWLIST, inbox_path, dedup)
 
-        assert result == "accepted"
+        assert result.status == "accepted"
         # google_chat_inbox.yaml に書かれる (agent mailbox ではない)
         assert "google_chat_inbox.yaml" in inbox_path
 
