@@ -104,6 +104,7 @@
 !scripts/chat_subscription_renew.py
 !scripts/chat_listener.py
 !scripts/chat_intent_parser.py
+!scripts/google_chat_inbox_watcher.sh
 
 
 # SayTask (sample template only, not actual data)
