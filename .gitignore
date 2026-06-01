@@ -102,6 +102,7 @@
 !scripts/switch_cli.sh
 !scripts/dashboard-viewer.py
 !scripts/chat_subscription_renew.py
+!scripts/chat_listener.py
 !scripts/chat_intent_parser.py
 
 
