@@ -208,8 +208,41 @@ def annotate_chat_inbox_entry(entry: dict, config_path: str = "config/external_i
     """
     chat_inbox.yaml のエントリに intent 解析結果を追記して返す。
     実際の YAML 書き込みは呼び出し元 (家老 / watcher) が行う。
+
+    parser 内部の IntentResult を inbox schema 形式に写像する:
+      - skill_source == "core" → core_type = intent, skill_id/skill_type = null
+      - skill_source != "core" → core_type = "cmd_new", skill_id = skill_source, skill_type = intent
+      - requires_karo_approval は intent.extracted に明示
     """
     text = entry.get("text", "")
     result = parse_intent(text, config_path=config_path)
-    entry["intent"] = result.to_dict()
+
+    if result.skill_source and result.skill_source != "core":
+        core_type = "cmd_new"
+        skill_id = result.skill_source
+        skill_type = result.intent if result.intent != "unknown" else None
+    else:
+        core_type = result.intent if result.intent != "unknown" else None
+        skill_id = None
+        skill_type = None
+
+    extracted: Optional[dict] = None
+    if result.requires_karo_approval or result.injection_detected:
+        extracted = {
+            "requires_karo_approval": result.requires_karo_approval,
+            "injection_detected": result.injection_detected,
+        }
+
+    entry["intent"] = {
+        "status": "parsed",
+        "core_type": core_type,
+        "skill_id": skill_id,
+        "skill_type": skill_type,
+        "confidence": result.confidence,
+        "extracted": extracted,
+    }
+
+    if "karo_decision" in entry and result.requires_karo_approval:
+        entry["karo_decision"]["confirmation_required"] = True
+
     return entry

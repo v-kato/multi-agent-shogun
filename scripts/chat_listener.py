@@ -290,7 +290,7 @@ def process_message(
     """
     attributes = dict(pubsub_message.attributes)
     delivery_id = pubsub_message.message_id
-    received_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+09:00")
+    received_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     event_time = attributes.get("ce-time", "")
 
     # Step 1: ★ノイズフィルタ (最優先・allowlist より前)

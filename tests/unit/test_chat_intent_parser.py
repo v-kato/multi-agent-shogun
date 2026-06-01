@@ -323,14 +323,13 @@ def test_whitespace_only():
 def test_annotate_entry_adds_intent():
     entry = {"text": "キャンセル", "message_name": "spaces/X/messages/1"}
     annotated = annotate_chat_inbox_entry(entry, config_path="config/external_inputs.yaml")
-    # テスト環境では config ファイルが存在しない可能性があるため直接 _config を渡せないが、
-    # ここでは annotate_chat_inbox_entry が intent キーを追加することを確認する。
+    # annotate_chat_inbox_entry が inbox schema 形式の intent キーを追加することを確認する。
     assert "intent" in annotated
-    assert "intent" in annotated["intent"]
+    assert "status" in annotated["intent"]
 
 
 def test_annotate_entry_uses_provided_config(tmp_path):
-    """annotate_chat_inbox_entry が config を正しくロードする。"""
+    """annotate_chat_inbox_entry が config を正しくロードし inbox schema に写像する。"""
     import yaml
 
     config_file = tmp_path / "external_inputs.yaml"
@@ -338,8 +337,87 @@ def test_annotate_entry_uses_provided_config(tmp_path):
 
     entry = {"text": "提出してください", "message_name": "spaces/X/messages/2"}
     annotated = annotate_chat_inbox_entry(entry, config_path=str(config_file))
-    assert annotated["intent"]["intent"] == "submit"
-    assert annotated["intent"]["requires_karo_approval"] is True
+    # submit は pokemon_shipment スキル → skill_type == "submit"
+    assert annotated["intent"]["skill_type"] == "submit"
+    assert annotated["intent"]["extracted"]["requires_karo_approval"] is True
+
+
+# ─── annotate_chat_inbox_entry inbox schema 整合 ─────────────────────────────
+
+
+def test_annotate_inbox_schema_core_intent(tmp_path):
+    """コアインテント (cancel) は core_type に写像され skill_id/skill_type は null。"""
+    import yaml
+
+    config_file = tmp_path / "external_inputs.yaml"
+    config_file.write_text(yaml.dump(SAMPLE_CONFIG), encoding="utf-8")
+
+    entry = {"text": "キャンセル"}
+    annotated = annotate_chat_inbox_entry(entry, config_path=str(config_file))
+    intent = annotated["intent"]
+    assert intent["status"] == "parsed"
+    assert intent["core_type"] == "cancel"
+    assert intent["skill_id"] is None
+    assert intent["skill_type"] is None
+    assert isinstance(intent["confidence"], float)
+
+
+def test_annotate_inbox_schema_skill_intent(tmp_path):
+    """スキルインテント (modify) は core_type=cmd_new / skill_id / skill_type に写像。"""
+    import yaml
+
+    config_file = tmp_path / "external_inputs.yaml"
+    config_file.write_text(yaml.dump(SAMPLE_CONFIG), encoding="utf-8")
+
+    entry = {"text": "出荷依頼書修正 20260520 ビッグウイング 50個"}
+    annotated = annotate_chat_inbox_entry(entry, config_path=str(config_file))
+    intent = annotated["intent"]
+    assert intent["status"] == "parsed"
+    assert intent["core_type"] == "cmd_new"
+    assert intent["skill_id"] == "pokemon_shipment"
+    assert intent["skill_type"] == "modify"
+
+
+def test_annotate_inbox_schema_submit_requires_approval(tmp_path):
+    """submit の requires_karo_approval は intent.extracted に明示される。"""
+    import yaml
+
+    config_file = tmp_path / "external_inputs.yaml"
+    config_file.write_text(yaml.dump(SAMPLE_CONFIG), encoding="utf-8")
+
+    entry = {"text": "提出してください"}
+    annotated = annotate_chat_inbox_entry(entry, config_path=str(config_file))
+    assert annotated["intent"]["extracted"]["requires_karo_approval"] is True
+
+
+def test_annotate_inbox_schema_karo_decision_updated(tmp_path):
+    """karo_decision が既存の場合、confirmation_required が True に更新される。"""
+    import yaml
+
+    config_file = tmp_path / "external_inputs.yaml"
+    config_file.write_text(yaml.dump(SAMPLE_CONFIG), encoding="utf-8")
+
+    entry = {
+        "text": "提出してください",
+        "karo_decision": {"status": "pending", "confirmation_required": False},
+    }
+    annotated = annotate_chat_inbox_entry(entry, config_path=str(config_file))
+    assert annotated["karo_decision"]["confirmation_required"] is True
+
+
+def test_annotate_inbox_schema_unknown_no_extracted(tmp_path):
+    """unknown かつ injection なしの場合、extracted は None。"""
+    import yaml
+
+    config_file = tmp_path / "external_inputs.yaml"
+    config_file.write_text(yaml.dump(SAMPLE_CONFIG), encoding="utf-8")
+
+    entry = {"text": "こんにちは"}
+    annotated = annotate_chat_inbox_entry(entry, config_path=str(config_file))
+    intent = annotated["intent"]
+    assert intent["status"] == "parsed"
+    assert intent["core_type"] is None
+    assert intent["extracted"] is None
 
 
 # ─── IntentResult.to_dict ───────────────────────────────────────────────────
