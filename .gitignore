@@ -70,6 +70,7 @@
 # Config (sample files only, no secrets)
 !config/
 !config/ntfy_auth.env.sample
+!config/external_inputs.yaml
 
 # Templates
 !templates/
@@ -100,6 +101,11 @@
 !scripts/ratelimit_check.sh
 !scripts/switch_cli.sh
 !scripts/dashboard-viewer.py
+!scripts/chat_subscription_renew.py
+!scripts/chat_listener.py
+!scripts/chat_intent_parser.py
+!scripts/google_chat_inbox_watcher.sh
+!scripts/google_chat_inbox_update.py
 
 
 # SayTask (sample template only, not actual data)
@@ -172,6 +178,7 @@ tests/specs/osato_lms_*
 !tests/fixtures/*.yaml
 !tests/unit/
 !tests/unit/*.bats
+!tests/unit/*.py
 !tests/integration/
 !tests/integration/*.bats
 !tests/e2e/

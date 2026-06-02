@@ -1,0 +1,92 @@
+# external_inputs.yaml — external input intent registry
+# cmd_506 Batch D (shogun 汎用 core + skill 拡張点)
+# ★ upstream PR 視野: v-sync 固有値は google-chat-events-config.yaml 側で管理
+
+intent_parser:
+  feature_flags:
+    llm_fallback_enabled: false  # 初期は deterministic rules のみ
+
+  # core intents (shogun 汎用語彙)
+  core_intents:
+    - intent: cmd_new
+      high_risk: false
+      patterns:
+        - "^(新しい|新規).*(コマンド|cmd|タスク|指示)"
+        - "^cmd[_\\s]*(new|作成|start)"
+        - "^新規(タスク|コマンド)"
+
+    - intent: status_check
+      high_risk: false
+      patterns:
+        - "status\\s*(は|を|教えて|確認|チェック|check)?"
+        - "^(状態|進捗|進行状況)(は|を|教えて|確認)?"
+        - "^(どうなって|どうなった|今どう)"
+        - "どんな感じ"
+        - "^(確認|チェック)\\s*(し|お願い|して|したい)"
+
+    - intent: approve
+      high_risk: false
+      patterns:
+        - "^(承認|OK|はい|yes|了解|わかりました|問題ない|大丈夫)(です|ました|しました)?$"
+        - "^(approve|accepted?)\\s*$"
+        - "^(進めて|続けて|やって)(ください|もらって|もらえ)?$"
+
+    - intent: cancel
+      high_risk: false
+      patterns:
+        - "^(キャンセル|cancel|中止|取消|やめて|停止)(ください|します|してください|お願い)?$"
+        - "^(中断|やめます|止めて)(ください|もらえ)?$"
+
+    - intent: clarify
+      high_risk: false
+      patterns:
+        - "^(わからない|理解できない|意味が|もう一度|もう少し)(説明|教えて|詳しく)?"
+        - "^(explain|clarify|詳細)(してください|お願い|して|を)?"
+        - "\\?$"
+
+  # 高リスク intent 定義 (requires_karo_approval=True が自動付与される)
+  high_risk_intents:
+    - submit
+    - delete
+    - publish
+    - send_external
+
+  # skill 拡張点 (pokemon-shipment が最初の登録例)
+  skill_extensions:
+    pokemon_shipment:
+      enabled: true
+      intents:
+        - intent: modify
+          high_risk: false
+          patterns:
+            - "(出荷依頼書|依頼書).*(修正|変更|直して|直す)"
+            - "^修正\\s+\\d{8}"
+            - "(修正|変更)(してください|をお願い|します|して)"
+
+        - intent: submit
+          high_risk: true  # ★ 外部送信のため家老確認必須
+          patterns:
+            - "^(提出|submit)(してください|します|お願い|して)?$"
+            - "(出荷依頼書|依頼書).*(提出|送って|送信|出して)"
+            - "^(出して|送って)(ください|もらえ)?$"
+
+        - intent: confirm
+          high_risk: false
+          patterns:
+            - "^(確認|confirm)(します|してください|した|ました)?$"
+            - "(内容|数量|金額).*(確認|チェック|見て)"
+
+  # Prompt Injection 検出パターン (これらに一致するとスコアを大幅ダウン)
+  prompt_injection_patterns:
+    - "ignore\\s+(previous|all|the|above)\\s+instructions?"
+    - "you\\s+are\\s+now\\s+(a|an)\\s+"
+    - "system\\s*:\\s*"
+    - "assistant\\s*:\\s*"
+    - "human\\s*:\\s*"
+    - "```(yaml|json|bash|sh|python)"
+    - "^---"
+    - "(rm|del|format|drop|truncate|execute|eval|exec)\\s*[-(/]"
+    - "override\\s+(safety|security|all)\\s*(rules|instructions|constraints)?"
+    - "\\$\\{|\\$\\(|`[^`]*`"  # shell expansion patterns
+    - "あなたは今から"
+    - "今すぐ.*(実行|削除|送信)"
