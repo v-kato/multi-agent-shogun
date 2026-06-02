@@ -75,36 +75,34 @@ language:
 
 **CRITICAL**: dashboard.md is secondary data (karo's summary). Primary data = YAML files. Always verify from YAML.
 
-## /new Recovery (ashigaru/gunshi only)
+## /new Recovery (ashigaru only)
 
 Lightweight recovery using only AGENTS.md (auto-loaded). Do NOT read instructions/*.md (cost saving).
 
 ```
-Step 1: tmux display-message -t "$TMUX_PANE" -p '#{@agent_id}' → ashigaru{N} or gunshi
-Step 2: (gunshi only) mcp__memory__read_graph (skip on failure). Ashigaru skip — task YAML is sufficient.
-Step 3: Read queue/tasks/{your_id}.yaml →
+Step 1: tmux display-message -t "$TMUX_PANE" -p '#{@agent_id}' → ashigaru{N}
+Step 2: Read queue/tasks/{your_id}.yaml →
         assigned=work (execute task), idle=wait, done=wait (DO NOT re-report)
-Step 4: If task has "project:" field → read context/{project}.md
+Step 3: If task has "project:" field → read context/{project}.md
         If task has "target_path:" → read that file
-Step 5: Start work (only if assigned=work)
+Step 4: Start work (only if assigned=work)
 ```
 
-**CRITICAL**: Steps 1-3を完了するまでinbox処理するな。`inboxN` nudgeが先に届いても無視し、自己識別を必ず先に終わらせよ。
+**CRITICAL**: Steps 1-2を完了するまでinbox処理するな。`inboxN` nudgeが先に届いても無視し、自己識別を必ず先に終わらせよ。
 
-Forbidden after /new: reading instructions/*.md (1st task), polling (F004), contacting humans directly (F002). Trust task YAML only — pre-/new memory is gone.
+Forbidden after /new (ashigaru): reading instructions/*.md (1st task), polling (F004), contacting humans directly (F002). Trust task YAML only — pre-/new memory is gone.
+
+## /clear・compaction Recovery (karo / gunshi / shogun — command-layer agents)
+
+Persona・戦国口調・forbidden_actions の再確立は **SessionStart hook** (`scripts/session_start_hook.sh`, matcher=`clear`/`compact`) が自動注入する。手順詳細は hook 側を正とする。
+
+**Forbidden after /new・compaction**:
+- persona 確立前に足軽/軍師報告を大量処理すること（三人称化・役職混乱の原因）
+- 自 pane の `tmux capture-pane` 実行（自己観察ループの入口）
 
 ## Summary Generation (compaction)
 
 Always include: 1) Agent role (shogun/karo/ashigaru/gunshi) 2) Forbidden actions list 3) Current task ID (cmd_xxx)
-
-## Post-Compaction Recovery (CRITICAL)
-
-After compaction, the system instructs "Continue the conversation from where it left off." **This does NOT exempt you from re-reading your instructions file.** Compaction summaries do NOT preserve persona or speech style.
-
-**Mandatory**: After compaction, before resuming work, execute Session Start Step 4:
-- Read your instructions file (shogun→`instructions/generated/codex-shogun.md`, etc.)
-- Restore persona and speech style (戦国口調 for shogun/karo)
-- Then resume the conversation naturally
 
 # Communication Protocol
 
@@ -143,7 +141,7 @@ The nudge is minimal: `inboxN` (e.g. `inbox3` = 3 unread). That's it.
 **Agent reads the inbox file itself.** Message content never travels through tmux — only a short wake-up signal.
 
 Special cases (CLI commands sent via `tmux send-keys`):
-- `type: clear_command` → sends `/new` + Enter via send-keys（/clear→/new自動変換）
+- `type: clear_command` → sends context reset command via send-keys (Claude/Copilot/Kimi: `/clear`, Codex/OpenCode: `/new`)
 - `type: model_switch` → sends the /model command via send-keys
 
 **Escalation** (when nudge is not processed):
@@ -151,7 +149,7 @@ Special cases (CLI commands sent via `tmux send-keys`):
 | Elapsed | Action | Trigger |
 |---------|--------|---------|
 | 0〜2 min | Standard pty nudge | Normal delivery |
-| 2〜4 min | Escape×2 + nudge | Cursor position bug workaround |
+| 2〜4 min | Escape×2 + recovery nudge | Copilot/Kimi use Escape×2 + Ctrl-C + nudge. Claude/Codex/OpenCode use a plain nudge instead |
 | 4 min+ | スキップ（Codexは`/clear`不可） | Force session reset + YAML re-read |
 
 ## Inbox Processing Protocol (karo/ashigaru/gunshi)
@@ -171,7 +169,7 @@ When you receive `inboxN` (e.g. `inbox3`):
 3. Only then go idle
 
 This is NOT optional. If you skip this and a redo message is waiting,
-you will be stuck idle until the next nudge escalation or task reassignment.
+you will be stuck idle until the next escalation or task reassignment.
 
 ## Redo Protocol
 
@@ -179,10 +177,10 @@ When Karo determines a task needs to be redone:
 
 1. Karo writes new task YAML with new task_id (e.g., `subtask_097d` → `subtask_097d2`), adds `redo_of` field
 2. Karo sends `clear_command` type inbox message (NOT `task_assigned`)
-3. inbox_watcher delivers `/new` to the agent（/clear→/new自動変換） → session reset
+3. inbox_watcher delivers the CLI-appropriate context reset command to the agent → session reset
 4. Agent recovers via Session Start procedure, reads new task YAML, starts fresh
 
-Race condition is eliminated: `/new` wipes old context. Agent re-reads YAML with new task_id.
+Race condition is eliminated: the context reset wipes old context. Agent re-reads YAML with new task_id.
 
 ## Report Flow (interrupt prevention)
 
@@ -225,8 +223,8 @@ System manages ALL white-collar work, not just self-improvement. Project folders
 
 1. **SKIP = FAIL**: テスト報告でSKIP数が1以上なら「テスト未完了」扱い。「完了」と報告してはならない。
 2. **Preflight check**: テスト実行前に前提条件（依存ツール、エージェント稼働状態等）を確認。満たせないなら実行せず報告。
-3. **E2Eテストは家老が担当**: 全エージェント操作権限を持つ家老がE2Eを実行。足軽はユニットテストのみ。
-4. **テスト計画レビュー**: 家老はテスト計画を事前レビューし、前提条件の実現可能性を確認してから実行に移す。
+3. **家老は交通整理**: 家老はワークフローを回す管理職であり、実作業・品質レビュー・採否判断・RCAを抱え込まない。レビュー系は軍師、実行系は足軽へ委譲する。
+4. **E2Eテストは家老が統括**: 家老はE2Eの責任者として、実行計画レビュー・前提確認・最終判定を担当する。実行コマンドは原則として足軽へ委譲する。家老が直接実行してよいのは、全エージェント操作権限・秘密情報・VPS/本番接続・最終gateの一元管理が必要な場合に限る。その場合も理由をreport/dashboardに明記する。
 
 # Batch Processing Protocol (all agents)
 
