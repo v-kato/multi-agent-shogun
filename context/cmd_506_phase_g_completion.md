@@ -1,7 +1,7 @@
 # cmd_506 Phase G 完了報告
 
-**作成日時**: 2026-06-01T15:00 JST  
-**担当**: ashigaru4  
+**作成日時**: 2026-06-01T15:00 JST
+**担当**: ashigaru4
 **branch**: feature/external-inputs-google-chat
 
 ---

@@ -1,13 +1,13 @@
 # VPS PR #118 検証計画書 (cmd_334)
 
-作成日: 2026-05-17  
+作成日: 2026-05-17
 作成者: 家老 (karo)
 
 ---
 
 ## 概要
 
-PR #118 (OpenCode 統合 by ZenkakuHiragana) の merge 加速のため、  
+PR #118 (OpenCode 統合 by ZenkakuHiragana) の merge 加速のため、
 Contabo VPS (144.91.125.163) を multi-agent-shogun 検証環境として整備した記録と手順書。
 
 ---
