@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
 # google_chat_inbox_watcher.sh — Google Chat 外部入力 inbox 監視
-# Usage: bash scripts/google_chat_inbox_watcher.sh
+# Usage: bash scripts/google_chat_inbox_watcher.sh [--inbox <path>] [--target <agent>]
 #
 # 設計思想:
 #   queue/inbox/google_chat_inbox.yaml を inotify 監視
@@ -10,7 +10,22 @@
 #   既存 inbox_watcher.sh への直接統合禁止 (cmd_503 確定方針・OSS追跡対象)
 #   起動方式: tmux または supervisor 管理。systemd 化は後続 hardening。
 #   cmd_506 G-2: message_id 単位の state 管理で通知ストーム恒久停止
+#   cmd_544 G-3: --inbox/--target 引数尊重 + 親ディレクトリ moved_to 監視
 # ═══════════════════════════════════════════════════════════════
+
+# ─── 引数解析ヘルパー (テスト/非テスト共通) ───
+# テストから _parse_watcher_args を直接呼び出して引数解析を検証可能
+_parse_watcher_args() {
+    _PARSED_INBOX=""
+    _PARSED_TARGET="karo"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --inbox)  _PARSED_INBOX="$2";  shift 2 ;;
+            --target) _PARSED_TARGET="$2"; shift 2 ;;
+            *)        shift ;;
+        esac
+    done
+}
 
 # ─── Testing guard ───
 # __GOOGLE_CHAT_INBOX_WATCHER_TESTING__=1 のときは関数定義のみロード
@@ -18,8 +33,29 @@
 if [ "${__GOOGLE_CHAT_INBOX_WATCHER_TESTING__:-}" != "1" ]; then
     set -euo pipefail
 
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    GOOGLE_CHAT_INBOX="${SCRIPT_DIR}/queue/inbox/google_chat_inbox.yaml"
+    # SCRIPT_DIR: scripts/inbox_write.sh / .venv 探索用。GOOGLE_CHAT_SCRIPT_DIR で override 可能
+    if [ -n "${GOOGLE_CHAT_SCRIPT_DIR:-}" ]; then
+        SCRIPT_DIR="$GOOGLE_CHAT_SCRIPT_DIR"
+    else
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    fi
+
+    # 引数解析
+    _parse_watcher_args "$@"
+
+    # inbox path 解決: --inbox 引数優先 (相対パスは起動 cwd 基準で絶対化)
+    if [ -n "$_PARSED_INBOX" ]; then
+        if [[ "$_PARSED_INBOX" == /* ]]; then
+            GOOGLE_CHAT_INBOX="$_PARSED_INBOX"
+        else
+            GOOGLE_CHAT_INBOX="$(pwd)/$_PARSED_INBOX"
+        fi
+    else
+        GOOGLE_CHAT_INBOX="${SCRIPT_DIR}/queue/inbox/google_chat_inbox.yaml"
+    fi
+
+    # 通知先エージェント
+    NOTIFY_TARGET="$_PARSED_TARGET"
 
     if ! command -v inotifywait &>/dev/null; then
         echo "[google_chat_inbox_watcher] ERROR: inotifywait not found. Install: sudo apt install inotify-tools" >&2
@@ -58,7 +94,7 @@ if [ "${__GOOGLE_CHAT_INBOX_WATCHER_TESTING__:-}" != "1" ]; then
     trap 'rm -f "$_WATCHER_PID_FILE"' EXIT
     echo "[$(date)] PID file 作成: $_WATCHER_PID_FILE (PID=$$)" >&2
 
-    echo "[$(date)] google_chat_inbox_watcher started — inbox: $GOOGLE_CHAT_INBOX" >&2
+    echo "[$(date)] google_chat_inbox_watcher started — inbox: $GOOGLE_CHAT_INBOX — target: ${NOTIFY_TARGET}" >&2
 fi
 
 # ─── Python インタプリタ解決 ───
@@ -74,8 +110,16 @@ _python3() {
 
 # ─── State ファイルパス ───
 # テスト時は GOOGLE_CHAT_WATCHER_STATE 環境変数で上書き可能
+# 非テスト時は inbox の 2 段上 (queue/) から state/ を導出し inbox と同 root に揃える
 _watcher_state_path() {
-    echo "${GOOGLE_CHAT_WATCHER_STATE:-${SCRIPT_DIR}/queue/state/google_chat_inbox_watcher_state.yaml}"
+    if [ -n "${GOOGLE_CHAT_WATCHER_STATE:-}" ]; then
+        echo "$GOOGLE_CHAT_WATCHER_STATE"
+    else
+        local inbox_dir queue_dir
+        inbox_dir="$(dirname "$GOOGLE_CHAT_INBOX")"
+        queue_dir="$(dirname "$inbox_dir")"
+        echo "${queue_dir}/state/google_chat_inbox_watcher_state.yaml"
+    fi
 }
 
 # ─── 未処理件数カウント ───
@@ -238,8 +282,8 @@ notify_karo() {
     if [ "${count:-0}" -le 0 ] 2>/dev/null; then
         return 0
     fi
-    local msg="Google Chat 外部入力 ${count} 件。queue/inbox/google_chat_inbox.yaml を確認せよ。"
-    bash "${SCRIPT_DIR}/scripts/inbox_write.sh" karo "$msg" google_chat_received google_chat_inbox_watcher
+    local msg="Google Chat 外部入力 ${count} 件。${GOOGLE_CHAT_INBOX} を確認せよ。"
+    bash "${SCRIPT_DIR}/scripts/inbox_write.sh" "${NOTIFY_TARGET:-karo}" "$msg" google_chat_received google_chat_inbox_watcher
     return $?
 }
 
@@ -280,14 +324,30 @@ check_on_start
 
 INOTIFY_TIMEOUT="${INOTIFY_TIMEOUT:-30}"
 
+# 親ディレクトリ監視: atomic rename (os.replace) の moved_to を確実に捕捉する
+INBOX_DIR="$(dirname "$GOOGLE_CHAT_INBOX")"
+INBOX_BASENAME="$(basename "$GOOGLE_CHAT_INBOX")"
+
 while true; do
     set +e
-    inotifywait -q -t "$INOTIFY_TIMEOUT" -e modify -e close_write "$GOOGLE_CHAT_INBOX" 2>/dev/null
+    inotify_output=$(inotifywait -q -t "$INOTIFY_TIMEOUT" \
+        -e modify -e close_write -e moved_to \
+        --format '%f' "$INBOX_DIR" 2>/dev/null)
     rc=$?
     set -e
 
     sleep 0.3
-    check_and_notify
+
+    if [ "$rc" -eq 0 ]; then
+        # イベント発生: 対象 basename のイベントのみ即時処理 (basename filter)
+        if echo "$inotify_output" | grep -qF "$INBOX_BASENAME"; then
+            check_and_notify
+        fi
+        # 対象外ファイルのイベントはスキップ (timeout 経路の safety net で後処理)
+    else
+        # timeout (rc!=0): safety net として check_and_notify
+        check_and_notify
+    fi
 done
 
 fi
