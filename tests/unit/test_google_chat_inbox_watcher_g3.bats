@@ -199,6 +199,68 @@ YAML
     [ "$(get_inbox_write_call_count)" -eq 1 ]
 }
 
+@test "T-G3-009: SCRIPT_DIR != inbox root — notify_karo は inbox root 側の inbox_write.sh を呼ぶ" {
+    # root A: TEST_TMP (GOOGLE_CHAT_INBOX のプロジェクトルート)
+    # root B: TEST_TMP_B (worktree を模擬 — SCRIPT_DIR がここを指す)
+    local TEST_TMP_B
+    TEST_TMP_B="$(mktemp -d)"
+    mkdir -p "$TEST_TMP_B/scripts"
+    mkdir -p "$TEST_TMP_B/queue/inbox"
+
+    # root A の inbox_write.sh — 呼ばれるべきもの (ROOT_A マーカー付き)
+    cat > "$TEST_TMP/scripts/inbox_write.sh" << 'MOCK_A'
+#!/bin/bash
+echo "ROOT_A:$*" >> "$(dirname "$0")/../inbox_write_calls_a.log"
+exit 0
+MOCK_A
+    chmod +x "$TEST_TMP/scripts/inbox_write.sh"
+
+    # root B の inbox_write.sh — 呼ばれてはいけないもの (ROOT_B マーカー付き)
+    cat > "$TEST_TMP_B/scripts/inbox_write.sh" << 'MOCK_B'
+#!/bin/bash
+echo "ROOT_B:$*" >> "$(dirname "$0")/../inbox_write_calls_b.log"
+exit 0
+MOCK_B
+    chmod +x "$TEST_TMP_B/scripts/inbox_write.sh"
+
+    # SCRIPT_DIR を worktree (root B) に変更
+    export SCRIPT_DIR="$TEST_TMP_B"
+    # GOOGLE_CHAT_INBOX は root A のまま
+    # GOOGLE_CHAT_INBOX_WRITE_ROOT / SHOGUN_ROOT は未設定 — 推定ロジック発動
+
+    # 未処理エントリを root A の inbox に追加
+    cat > "$GOOGLE_CHAT_INBOX" << 'YAML'
+inbox:
+  - message_id: root_split_regression_001
+    text: "root 分離回帰テスト"
+    processed: false
+    rejected: false
+YAML
+
+    NOTIFY_TARGET="karo" check_and_notify
+
+    # root A の log が存在する → 正しい inbox_write.sh が呼ばれた
+    [ -f "$TEST_TMP/inbox_write_calls_a.log" ]
+    local log_a
+    log_a=$(cat "$TEST_TMP/inbox_write_calls_a.log")
+    [[ "$log_a" == ROOT_A:* ]]
+
+    # root B の log は存在しない → worktree 側 inbox_write.sh は呼ばれていない
+    ! [ -f "$TEST_TMP_B/inbox_write_calls_b.log" ]
+
+    rm -rf "$TEST_TMP_B"
+}
+
+@test "T-G3-010: --shogun-root 引数が _watcher_inbox_write_root の優先 source になる" {
+    _parse_watcher_args --shogun-root /explicit/shogun/root --inbox /some/queue/inbox/foo.yaml
+    [ "$_PARSED_SHOGUN_ROOT" = "/explicit/shogun/root" ]
+
+    # _watcher_inbox_write_root は _PARSED_SHOGUN_ROOT を GOOGLE_CHAT_INBOX 推定より優先する
+    local root
+    root=$(_watcher_inbox_write_root)
+    [ "$root" = "/explicit/shogun/root" ]
+}
+
 @test "T-G3-005: basename filter — 対象外ファイルの moved_to では通知しない" {
     if ! command -v inotifywait &>/dev/null; then
         echo "PREFLIGHT FAIL: inotifywait not found" >&2

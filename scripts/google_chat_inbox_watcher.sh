@@ -18,11 +18,13 @@
 _parse_watcher_args() {
     _PARSED_INBOX=""
     _PARSED_TARGET="karo"
+    _PARSED_SHOGUN_ROOT=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --inbox)  _PARSED_INBOX="$2";  shift 2 ;;
-            --target) _PARSED_TARGET="$2"; shift 2 ;;
-            *)        shift ;;
+            --inbox)       _PARSED_INBOX="$2";       shift 2 ;;
+            --target)      _PARSED_TARGET="$2";      shift 2 ;;
+            --shogun-root) _PARSED_SHOGUN_ROOT="$2"; shift 2 ;;
+            *)             shift ;;
         esac
     done
 }
@@ -119,6 +121,28 @@ _watcher_state_path() {
         inbox_dir="$(dirname "$GOOGLE_CHAT_INBOX")"
         queue_dir="$(dirname "$inbox_dir")"
         echo "${queue_dir}/state/google_chat_inbox_watcher_state.yaml"
+    fi
+}
+
+# ─── inbox_write.sh が書く project root 解決 ───
+# notify_karo が呼ぶ inbox_write.sh のプロジェクトルートを決定する。
+# worktree から起動した場合でも実 shogun root の inbox に通知できるよう root 分離設計。
+# 優先順: 1) GOOGLE_CHAT_INBOX_WRITE_ROOT env (テスト/live 両対応 override)
+#         2) SHOGUN_ROOT env
+#         3) --shogun-root 引数 (_PARSED_SHOGUN_ROOT)
+#         4) GOOGLE_CHAT_INBOX から推定 (queue/inbox/xxx.yaml の 3 段上 = project root)
+_watcher_inbox_write_root() {
+    if [ -n "${GOOGLE_CHAT_INBOX_WRITE_ROOT:-}" ]; then
+        echo "$GOOGLE_CHAT_INBOX_WRITE_ROOT"
+    elif [ -n "${SHOGUN_ROOT:-}" ]; then
+        echo "$SHOGUN_ROOT"
+    elif [ -n "${_PARSED_SHOGUN_ROOT:-}" ]; then
+        echo "$_PARSED_SHOGUN_ROOT"
+    else
+        local inbox_dir queue_dir
+        inbox_dir="$(dirname "${GOOGLE_CHAT_INBOX:-}")"
+        queue_dir="$(dirname "$inbox_dir")"
+        dirname "$queue_dir"
     fi
 }
 
@@ -283,7 +307,9 @@ notify_karo() {
         return 0
     fi
     local msg="Google Chat 外部入力 ${count} 件。${GOOGLE_CHAT_INBOX} を確認せよ。"
-    bash "${SCRIPT_DIR}/scripts/inbox_write.sh" "${NOTIFY_TARGET:-karo}" "$msg" google_chat_received google_chat_inbox_watcher
+    local _inbox_write_root
+    _inbox_write_root=$(_watcher_inbox_write_root)
+    bash "${_inbox_write_root}/scripts/inbox_write.sh" "${NOTIFY_TARGET:-karo}" "$msg" google_chat_received google_chat_inbox_watcher
     return $?
 }
 
@@ -340,7 +366,7 @@ while true; do
 
     if [ "$rc" -eq 0 ]; then
         # イベント発生: 対象 basename のイベントのみ即時処理 (basename filter)
-        if echo "$inotify_output" | grep -qF "$INBOX_BASENAME"; then
+        if [ "$inotify_output" = "$INBOX_BASENAME" ]; then
             check_and_notify
         fi
         # 対象外ファイルのイベントはスキップ (timeout 経路の safety net で後処理)
