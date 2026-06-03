@@ -331,7 +331,7 @@ task:
   output_dir: tmp/cmd_001/     # 永続成果物（スクショ・ログ・再利用script）の保存先
   description: |
     Create hello1.md with content 'おはよう1'
-    
+
     ## 成果物保存先
     スクショ・検証ログ・再利用script は `output_dir` フィールドの path に保存。
     純粋一時ファイル (中間draft等) は /tmp で可。
