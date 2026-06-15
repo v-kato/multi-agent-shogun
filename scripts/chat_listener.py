@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """
 chat_listener.py — Google Chat Pub/Sub pull → queue/inbox/google_chat_inbox.yaml
-cmd_506 Batch B / phase_h_addendum 反映 / G-2 ack 冪等化
+cmd_506 Batch B / phase_h_addendum 反映 / G-2 ack 冪等化 / cmd_554 Phase C interaction event mode 追加
 
 使用方法:
+  # 旧 Workspace Events mode (デフォルト):
   python3 scripts/chat_listener.py \
     --config config/google-chat-events-config.yaml \
     --credentials config/google-chat-events.json
 
-フロー:
+  # 新 interaction event mode (cmd_554 Phase C):
+  python3 scripts/chat_listener.py \
+    --config config/google-chat-events-config.yaml \
+    --credentials config/google-chat-events.json \
+    --mode interaction
+
+フロー (workspace_events mode):
   1. Pub/Sub pull
   2. ★ノイズフィルタ (ce-subject + ce-type) — allowlist 前最優先
   3. デコード (message.data bytes → base64? → UTF-8 JSON)
@@ -16,6 +23,14 @@ cmd_506 Batch B / phase_h_addendum 反映 / G-2 ack 冪等化
   5. YAML atomic append_if_absent (flock + temp + rename・同一 message_id 二重書込防止)
   6. 永続書込成功後に ack (書込失敗時は ack しない)
      G-2: 1 message ごとに try/process/ack 完結 (batch ack 撤廃)
+
+フロー (interaction mode):
+  1. Pub/Sub pull (新 interaction subscription)
+  2. decode: json.loads(message.data) のみ (base64 / CloudEvent 解体なし)
+  3. ★ノイズフィルタ: type == MESSAGE かつ target_space 照合 — allowlist 前最優先
+  4. スキーマ検証 + allowlist + dedup (旧経路と同一ロジック流用)
+  5. YAML atomic append_if_absent (不変)
+  6. 永続書込成功後に ack (G-2 不変)
 """
 
 import argparse
@@ -368,6 +383,306 @@ def atomic_yaml_append(inbox_path: str, entry: dict) -> None:
     atomic_yaml_append_if_absent(inbox_path, entry)
 
 
+# ── interaction event mode (cmd_554 Phase C) ────────────────────────────────────
+
+
+def decode_payload_interaction(data_bytes: bytes) -> dict:
+    """
+    interaction event mode: Pub/Sub message.data bytes → dict
+    json.loads(message.data) のみ。base64 / CloudEvent 解体なし。
+    日本語は UTF-8 直 parse で保持。
+    """
+    if not data_bytes:
+        raise ValueError("empty data")
+    try:
+        text = data_bytes.decode("utf-8")
+        return json.loads(text)
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise ValueError(f"malformed_payload: not valid UTF-8 JSON: {e}")
+
+
+def check_noise_filter_interaction(event: dict, target_space: str) -> tuple:
+    """
+    interaction event mode のノイズフィルタ (allowlist より前段)。
+    type == MESSAGE かつ target_space 照合。
+    DM (singleUserBotDm=True または spaceType==DIRECT_MESSAGE) は
+    space.name が dedicated space と異なっても通す。
+    ADDED_TO_SPACE / REMOVED_FROM_SPACE / CARD_CLICKED 等は inbox に載せず ack のみ。
+    space は event['space']['name'] と event['message']['space']['name'] の両系統 fallback。
+    """
+    event_type = event.get("type", "")
+    if not event_type:
+        return False, "missing_event_type"
+
+    if event_type != "MESSAGE":
+        return False, f"noise_event_type:{event_type}"
+
+    # space 照合: 両系統 fallback
+    space_name = ""
+    space_type = ""
+    single_user_bot_dm = False
+    event_space = event.get("space", {})
+    if isinstance(event_space, dict):
+        space_name = event_space.get("name", "")
+        space_type = event_space.get("spaceType", "")
+        single_user_bot_dm = bool(event_space.get("singleUserBotDm", False))
+    if not space_name:
+        msg_space = event.get("message", {}).get("space", {})
+        if isinstance(msg_space, dict):
+            space_name = msg_space.get("name", "")
+            if not space_type:
+                space_type = msg_space.get("spaceType", "")
+            if not single_user_bot_dm:
+                single_user_bot_dm = bool(msg_space.get("singleUserBotDm", False))
+
+    if not space_name:
+        return False, "missing_space"
+
+    # DM は space.name が dedicated space と異なっても通す
+    is_dm = single_user_bot_dm or space_type == "DIRECT_MESSAGE"
+    if not is_dm and space_name != target_space:
+        return False, "wrong_space"
+
+    return True, ""
+
+
+def extract_chat_message_interaction(event: dict) -> dict:
+    """interaction event mode: Event top-level から message dict を抽出"""
+    return event.get("message") or {}
+
+
+def build_inbox_entry_interaction(
+    message_id: str,
+    delivery_id: str,
+    received_at: str,
+    event_time: str,
+    event: dict,
+    message_data: dict,
+    rejected: bool = False,
+    reject_reason: str = None,
+) -> dict:
+    """
+    interaction event mode 用 docs/external_inputs/common/inbox_schema.md 準拠エントリ生成。
+    space: event['space'] 優先・fallback message_data['space']
+    thread: message_data['thread'] 優先・fallback event['thread']
+    """
+    # space fallback
+    space_raw = {}
+    event_space = event.get("space", {})
+    if isinstance(event_space, dict) and event_space.get("name"):
+        space_raw = event_space
+    elif isinstance(message_data.get("space"), dict):
+        space_raw = message_data["space"]
+    space_id = space_raw.get("name", "")
+    space_type = space_raw.get("spaceType") or None
+    single_user_bot_dm = True if space_raw.get("singleUserBotDm") else None
+
+    # thread fallback
+    thread_raw = message_data.get("thread", {})
+    if not (isinstance(thread_raw, dict) and thread_raw.get("name")):
+        thread_raw = event.get("thread", {})
+    thread_id = thread_raw.get("name", "") if isinstance(thread_raw, dict) else ""
+
+    sender = message_data.get("sender") or {}
+    text = message_data.get("text", "")
+    event_type = event.get("type", "MESSAGE")
+    sender_name = sender.get("name", "")
+    sender_display = sender.get("displayName", sender.get("display_name", ""))
+    sender_email = sender.get("email", "")
+
+    ts_compact = received_at.replace(":", "").replace("+", "p").replace("-", "")[:15]
+    suffix = (delivery_id or "noid")[-8:]
+    entry_id = f"ext_{ts_compact}_{suffix}"
+
+    return {
+        "id": entry_id,
+        "source_channel": "google_chat",
+        "message_id": message_id,
+        "delivery_id": delivery_id,
+        "received_at": received_at,
+        "event_time": event_time,
+        "event_type": event_type,
+        "sender": {
+            "id": sender_name,
+            "display_name": sender_display,
+            "verified_identifier": sender_email if sender_email else None,
+            "identifier_type": "email" if sender_email else None,
+            "channel_metadata": {},
+        },
+        "context": {
+            "space_id": space_id,
+            "thread_id": thread_id,
+            "raw_resource_name": message_id,
+            "space_type": space_type,
+            "single_user_bot_dm": single_user_bot_dm,
+        },
+        "text": text,
+        "normalized_text": text,
+        "read": False,
+        "processed": rejected,
+        "rejected": rejected,
+        "reject_reason": reject_reason,
+        "intent": {
+            "status": "pending",
+            "core_type": None,
+            "skill_id": None,
+            "skill_type": None,
+            "confidence": None,
+            "extracted": None,
+        },
+        "karo_decision": {
+            "status": "pending",
+            "reason": None,
+            "parent_cmd": None,
+            "confirmation_required": False,
+            "dashboard_action_required": False,
+        },
+    }
+
+
+def process_message_interaction(
+    pubsub_message,
+    target_space: str,
+    allowlist_config: dict,
+    inbox_path: str,
+    dedup_cache: set,
+) -> ProcessResult:
+    """
+    interaction event mode での 1 メッセージ処理。ProcessResult を返す。
+    G-2: should_ack を明示し、1 message ごとに ack を判断する。
+
+    should_ack=True: accepted / rejected:* / noise / malformed / message_id_missing / duplicate
+    should_ack=False: YAML 書込例外 / permission error
+    """
+    delivery_id = pubsub_message.message_id
+    received_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    # Step 1: decode (json.loads のみ)
+    try:
+        event = decode_payload_interaction(bytes(pubsub_message.data))
+    except ValueError as e:
+        logger.warning("interaction decode エラー: %s delivery_id=%s", e, delivery_id)
+        return ProcessResult(
+            status="rejected:malformed_payload",
+            should_ack=True,
+            appended=False,
+            message_id="",
+            reason="malformed_payload",
+        )
+
+    # Step 2: ★ノイズフィルタ (最優先・allowlist より前)
+    ok, reason = check_noise_filter_interaction(event, target_space)
+    if not ok:
+        logger.info("interaction ノイズフィルタ拒否: reason=%s delivery_id=%s", reason, delivery_id)
+        return ProcessResult(
+            status=f"rejected:{reason}",
+            should_ack=True,
+            appended=False,
+            message_id="",
+            reason=reason,
+        )
+
+    # Step 3: message 抽出 + message_id 検証
+    message_data = extract_chat_message_interaction(event)
+    message_id = message_data.get("name", "")
+    event_time = event.get("eventTime", "")
+
+    if not message_id:
+        logger.warning("interaction message.name 欠落 delivery_id=%s", delivery_id)
+        return ProcessResult(
+            status="rejected:message_id_missing",
+            should_ack=True,
+            appended=False,
+            message_id="",
+            reason="message_id_missing",
+        )
+
+    # Step 4: dedup (message.name が主要 dedup key)
+    if message_id in dedup_cache:
+        logger.info("interaction 重複: message_id=%s delivery_id=%s", message_id, delivery_id)
+        return ProcessResult(
+            status="rejected:duplicate_message",
+            should_ack=True,
+            appended=False,
+            message_id=message_id,
+            reason="duplicate_message",
+        )
+
+    # Step 5: allowlist 検証 (旧経路と同一ロジック流用)
+    sender = message_data.get("sender") or {}
+    ok, reason = check_allowlist(sender, allowlist_config)
+    if not ok:
+        logger.info(
+            "interaction allowlist 拒否: reason=%s sender_id=%s sender_type=%s",
+            reason, sender.get("name", "?"), sender.get("type", "?"),
+        )
+        entry = build_inbox_entry_interaction(
+            message_id=message_id,
+            delivery_id=delivery_id,
+            received_at=received_at,
+            event_time=event_time,
+            event=event,
+            message_data=message_data,
+            rejected=True,
+            reject_reason=reason,
+        )
+        try:
+            appended = atomic_yaml_append_if_absent(inbox_path, entry)
+            if appended:
+                dedup_cache.add(message_id)
+        except Exception as e:
+            logger.error("interaction inbox 書込失敗 (allowlist reject): %s", e)
+            return ProcessResult(
+                status="error:yaml_write_failed",
+                should_ack=False,
+                appended=False,
+                message_id=message_id,
+                reason=str(e),
+            )
+        return ProcessResult(
+            status=f"rejected:{reason}",
+            should_ack=True,
+            appended=appended,
+            message_id=message_id,
+            reason=reason,
+        )
+
+    # Step 6: inbox 追記 (永続書込成功後に ack)
+    entry = build_inbox_entry_interaction(
+        message_id=message_id,
+        delivery_id=delivery_id,
+        received_at=received_at,
+        event_time=event_time,
+        event=event,
+        message_data=message_data,
+    )
+    try:
+        appended = atomic_yaml_append_if_absent(inbox_path, entry)
+        if appended:
+            dedup_cache.add(message_id)
+            logger.info("interaction inbox 追記: message_id=%s", message_id)
+        else:
+            logger.info("interaction append_if_absent: 重複スキップ: %s", message_id)
+            dedup_cache.add(message_id)
+    except Exception as e:
+        logger.error("interaction inbox 書込失敗: %s delivery_id=%s", e, delivery_id)
+        return ProcessResult(
+            status="error:yaml_write_failed",
+            should_ack=False,
+            appended=False,
+            message_id=message_id,
+            reason=str(e),
+        )
+
+    return ProcessResult(
+        status="accepted",
+        should_ack=True,
+        appended=appended,
+        message_id=message_id,
+        reason="",
+    )
+
+
 def process_message(
     pubsub_message,
     expected_subject: str,
@@ -520,7 +835,9 @@ def process_message(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Google Chat Pub/Sub pull listener (cmd_506 Batch B / G-2)")
+    parser = argparse.ArgumentParser(
+        description="Google Chat Pub/Sub pull listener (cmd_506 Batch B / G-2 / cmd_554 Phase C interaction mode)"
+    )
     parser.add_argument("--config", default="config/google-chat-events-config.yaml")
     parser.add_argument("--credentials", default="config/google-chat-events.json")
     parser.add_argument("--inbox", default="queue/inbox/google_chat_inbox.yaml")
@@ -528,6 +845,12 @@ def main():
     parser.add_argument("--once", action="store_true", help="1 回 pull して終了 (デバッグ用)")
     parser.add_argument("--pid-file", default=DEFAULT_PID_FILE, help="PID file パス (単一起動保証)")
     parser.add_argument("--no-pid-file", action="store_true", help="PID file を使わない (テスト用)")
+    parser.add_argument(
+        "--mode",
+        choices=["workspace_events", "interaction"],
+        default="workspace_events",
+        help="listener mode: workspace_events=旧 CloudEvent 経路 (デフォルト) / interaction=Chat app Pub/Sub interaction events (cmd_554 Phase C)",
+    )
     args = parser.parse_args()
 
     # ★単一起動保証
@@ -540,82 +863,151 @@ def main():
     gc_cfg = cfg.get("google_chat", {})
 
     project_id = gc_cfg.get("project_id", "")
-    subscription_name = gc_cfg.get("subscription_name", "")
-
-    if not project_id or not subscription_name:
-        logger.error("config に project_id / subscription_name がありません")
-        sys.exit(1)
-
-    space_id = gc_cfg.get("chat_space_id", "")
-    expected_subject = f"//chat.googleapis.com/{space_id}"
-    expected_type = "google.workspace.chat.message.v1.created"
 
     ext_cfg = cfg.get("external_inputs", {})
     allowlist_config = (ext_cfg.get("allowlist", {}) or {}).get("google_chat", {}) or {}
     if not allowlist_config:
         allowlist_config = gc_cfg.get("allowlist", {}) or {}
 
-    logger.info("=== chat_listener 起動 ===")
-    logger.info("project: %s  subscription: %s", project_id, subscription_name)
-    logger.info("inbox: %s", args.inbox)
-
     subscriber = build_subscriber(args.credentials)
-    subscription_path = f"projects/{project_id}/subscriptions/{subscription_name}"
 
     dedup_cache = load_inbox_dedups(args.inbox)
     logger.info("dedup cache ロード: %d 件", len(dedup_cache))
 
-    try:
-        while True:
-            response = subscriber.pull(
-                request={
-                    "subscription": subscription_path,
-                    "max_messages": args.max_messages,
-                }
-            )
+    if args.mode == "interaction":
+        # interaction event mode (cmd_554 Phase C)
+        int_cfg = gc_cfg.get("interaction", {})
+        subscription_name = int_cfg.get("subscription_name", "") or gc_cfg.get("interaction_subscription_name", "")
+        target_space = gc_cfg.get("chat_space_id", "")
 
-            if not response.received_messages:
-                if args.once:
-                    break
-                time.sleep(5)
-                continue
+        if not project_id or not subscription_name:
+            logger.error("config に project_id / interaction.subscription_name がありません")
+            sys.exit(1)
 
-            # G-2: 1 message ごとに try/process/ack 完結 (batch ack 撤廃)
-            for received in response.received_messages:
-                try:
-                    result = process_message(
-                        received.message,
-                        expected_subject=expected_subject,
-                        expected_type=expected_type,
-                        allowlist_config=allowlist_config,
-                        inbox_path=args.inbox,
-                        dedup_cache=dedup_cache,
-                    )
-                except Exception as e:
-                    logger.error("process_message 例外: %s ack_id=%s", e, received.ack_id)
+        subscription_path = f"projects/{project_id}/subscriptions/{subscription_name}"
+        logger.info("=== chat_listener 起動 (interaction mode) ===")
+        logger.info("project: %s  subscription: %s", project_id, subscription_name)
+        logger.info("target_space: %s  inbox: %s", target_space, args.inbox)
+
+        try:
+            while True:
+                response = subscriber.pull(
+                    request={
+                        "subscription": subscription_path,
+                        "max_messages": args.max_messages,
+                    }
+                )
+
+                if not response.received_messages:
+                    if args.once:
+                        break
+                    time.sleep(5)
                     continue
 
-                if result.should_ack:
+                # G-2: 1 message ごとに try/process/ack 完結
+                for received in response.received_messages:
                     try:
-                        subscriber.acknowledge(
-                            request={
-                                "subscription": subscription_path,
-                                "ack_ids": [received.ack_id],
-                            }
+                        result = process_message_interaction(
+                            received.message,
+                            target_space=target_space,
+                            allowlist_config=allowlist_config,
+                            inbox_path=args.inbox,
+                            dedup_cache=dedup_cache,
                         )
-                        logger.info("ack: %s status=%s", result.message_id or received.message.message_id, result.status)
                     except Exception as e:
-                        logger.error("ack 失敗 (次 poll で再配信): %s", e)
-                else:
-                    logger.warning("ack スキップ (書込失敗): %s", result.reason)
+                        logger.error("process_message_interaction 例外: %s ack_id=%s", e, received.ack_id)
+                        continue
 
-            if args.once:
-                break
+                    if result.should_ack:
+                        try:
+                            subscriber.acknowledge(
+                                request={
+                                    "subscription": subscription_path,
+                                    "ack_ids": [received.ack_id],
+                                }
+                            )
+                            logger.info("ack: %s status=%s", result.message_id or received.message.message_id, result.status)
+                        except Exception as e:
+                            logger.error("ack 失敗 (次 poll で再配信): %s", e)
+                    else:
+                        logger.warning("ack スキップ (書込失敗): %s", result.reason)
 
-    except KeyboardInterrupt:
-        logger.info("停止 (KeyboardInterrupt)")
-    finally:
-        subscriber.close()
+                if args.once:
+                    break
+
+        except KeyboardInterrupt:
+            logger.info("停止 (KeyboardInterrupt)")
+        finally:
+            subscriber.close()
+
+    else:
+        # workspace_events mode (旧 CloudEvent 経路・デフォルト)
+        subscription_name = gc_cfg.get("subscription_name", "")
+
+        if not project_id or not subscription_name:
+            logger.error("config に project_id / subscription_name がありません")
+            sys.exit(1)
+
+        space_id = gc_cfg.get("chat_space_id", "")
+        expected_subject = f"//chat.googleapis.com/{space_id}"
+        expected_type = "google.workspace.chat.message.v1.created"
+
+        subscription_path = f"projects/{project_id}/subscriptions/{subscription_name}"
+        logger.info("=== chat_listener 起動 (workspace_events mode) ===")
+        logger.info("project: %s  subscription: %s", project_id, subscription_name)
+        logger.info("inbox: %s", args.inbox)
+
+        try:
+            while True:
+                response = subscriber.pull(
+                    request={
+                        "subscription": subscription_path,
+                        "max_messages": args.max_messages,
+                    }
+                )
+
+                if not response.received_messages:
+                    if args.once:
+                        break
+                    time.sleep(5)
+                    continue
+
+                # G-2: 1 message ごとに try/process/ack 完結 (batch ack 撤廃)
+                for received in response.received_messages:
+                    try:
+                        result = process_message(
+                            received.message,
+                            expected_subject=expected_subject,
+                            expected_type=expected_type,
+                            allowlist_config=allowlist_config,
+                            inbox_path=args.inbox,
+                            dedup_cache=dedup_cache,
+                        )
+                    except Exception as e:
+                        logger.error("process_message 例外: %s ack_id=%s", e, received.ack_id)
+                        continue
+
+                    if result.should_ack:
+                        try:
+                            subscriber.acknowledge(
+                                request={
+                                    "subscription": subscription_path,
+                                    "ack_ids": [received.ack_id],
+                                }
+                            )
+                            logger.info("ack: %s status=%s", result.message_id or received.message.message_id, result.status)
+                        except Exception as e:
+                            logger.error("ack 失敗 (次 poll で再配信): %s", e)
+                    else:
+                        logger.warning("ack スキップ (書込失敗): %s", result.reason)
+
+                if args.once:
+                    break
+
+        except KeyboardInterrupt:
+            logger.info("停止 (KeyboardInterrupt)")
+        finally:
+            subscriber.close()
 
 
 if __name__ == "__main__":

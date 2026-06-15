@@ -9,6 +9,7 @@ codd:
     - id: "design:external_input_karo_flow"
     - id: "design:external_input_google_chat_pubsub"
     - id: "design:external_input_google_chat_workspace_events"
+    - id: "design:external_input_google_chat_interaction_events"
     - id: "design:external_input_google_chat_setup_runbook"
 ---
 # 外部入力
