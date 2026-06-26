@@ -91,19 +91,13 @@ workflow:
       4. ルーティング判定:
          case "$target_agent" in
            QUEUE)
-             # 全足軽ビジー (適切tier + 上位 fallback 含め全員busy) → タスクを保留キューに積む
+             # 全足軽ビジー → タスクを保留キューに積む
              # 次の足軽完了時に再試行
              ;;
-           SWITCH:*)
-             # Phase 3: 下位tierアイドル足軽 → model-switch後に割り当て
-             # target_id="${target_agent#SWITCH:}"; target_id="${target_id%:*}"
-             # switch_model="${target_agent##*:}"
-             # shogun-model-switchスキルで切替後、inbox_writeで割当て
-             ;;
            ashigaru*)
-             # Phase 1 (完全一致) または Phase 2 (上位tier fallback) → そのまま割り当て
-             # Phase 2: 適切tier全員busy時のみ上位tier (Opus等) idle → model-switch不要で代替実行 (殿確定・品質担保)
+             # 現在割り当て予定の足軽 vs target_agent が異なる場合:
              # target_agent が異なるCLI → アイドルなのでCLI再起動OK（kill禁止はビジーペインのみ）
+             # target_agent と割り当て予定が同じ → そのまま
              ;;
          esac
 
@@ -328,14 +322,7 @@ task:
   task_id: subtask_001
   parent_cmd: cmd_001
   bloom_level: L3        # L1-L3=Ashigaru, L4-L6=Gunshi
-  output_dir: tmp/cmd_001/     # 永続成果物（スクショ・ログ・再利用script）の保存先
-  description: |
-    Create hello1.md with content 'おはよう1'
-
-    ## 成果物保存先
-    スクショ・検証ログ・再利用script は `output_dir` フィールドの path に保存。
-    純粋一時ファイル (中間draft等) は /tmp で可。
-    skill (shogun-cdp-automation 等) を呼ぶ場合は明示的に保存先指定すること。
+  description: "Create hello1.md with content 'おはよう1'"
   target_path: "/mnt/c/tools/multi-agent-shogun/hello1.md"
   echo_message: "🔥 足軽1号、先陣を切って参る！八刃一志！"
   status: assigned
@@ -346,7 +333,6 @@ task:
   task_id: subtask_003
   parent_cmd: cmd_001
   bloom_level: L6
-  output_dir: tmp/cmd_001/
   blocked_by: [subtask_001, subtask_002]
   description: "Integrate research results from ashigaru 1 and 2"
   target_path: "/mnt/c/tools/multi-agent-shogun/reports/integrated_report.md"
