@@ -163,3 +163,29 @@ ids = [item["id"] for item in data["inbox"]]
 assert ids == ["pending-old", "done-old"], ids
 PY
 }
+
+@test "slim_reports skips an unparsable stale report file instead of archiving it" {
+    write_yaml "$SHOGUN_QUEUE_DIR/shogun_to_karo.yaml" "queue: []"
+    write_yaml "$SHOGUN_QUEUE_DIR/reports/broken_report.yaml" $'parent_cmd: cmd_broken\nbad: [unterminated\n'
+    touch -d "2 days ago" "$SHOGUN_QUEUE_DIR/reports/broken_report.yaml"
+
+    run run_slim karo
+    assert_success
+    assert_output --partial "skipping unparsable report file"
+
+    [ -f "$SHOGUN_QUEUE_DIR/reports/broken_report.yaml" ]
+    [ ! -f "$SHOGUN_QUEUE_DIR/archive/reports/broken_report.yaml" ]
+}
+
+@test "slim_reports still archives a parsed-but-empty stale report file" {
+    write_yaml "$SHOGUN_QUEUE_DIR/shogun_to_karo.yaml" "queue: []"
+    write_yaml "$SHOGUN_QUEUE_DIR/reports/empty_report.yaml" ""
+    touch -d "2 days ago" "$SHOGUN_QUEUE_DIR/reports/empty_report.yaml"
+
+    run run_slim karo
+    assert_success
+    refute_output --partial "skipping unparsable report file"
+
+    [ ! -f "$SHOGUN_QUEUE_DIR/reports/empty_report.yaml" ]
+    [ -f "$SHOGUN_QUEUE_DIR/archive/reports/empty_report.yaml" ]
+}

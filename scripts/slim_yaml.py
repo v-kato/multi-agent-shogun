@@ -25,16 +25,27 @@ TASK_ACTIVE_STATUSES = {'idle', 'assigned', 'pending_blocked'}
 INVENTORY_AGE_SECONDS = 30 * 86400
 
 
-def load_yaml(filepath):
-    """Safely load YAML file."""
+def load_yaml_checked(filepath):
+    """Load a YAML file, distinguishing a parse failure from an empty/missing file.
+
+    Returns (data, parse_failed). parse_failed is True only when the file
+    exists but yaml.safe_load() raised YAMLError; data is {} in that case.
+    Callers that don't need to tell the two apart should use load_yaml().
+    """
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f) or {}
+            return yaml.safe_load(f) or {}, False
     except FileNotFoundError:
-        return {}
+        return {}, False
     except yaml.YAMLError as e:
         print(f"Error parsing {filepath}: {e}", file=sys.stderr)
-        return {}
+        return {}, True
+
+
+def load_yaml(filepath):
+    """Safely load YAML file. Returns {} on missing file or parse error."""
+    data, _ = load_yaml_checked(filepath)
+    return data
 
 
 def save_yaml(filepath, data):
@@ -270,7 +281,11 @@ def slim_reports(dry_run=False):
         if filepath.stem in CANONICAL_REPORTS:
             continue
 
-        data = load_yaml(filepath)
+        data, parse_failed = load_yaml_checked(filepath)
+        if parse_failed:
+            print(f"Warning: skipping unparsable report file (not archived): {filepath}", file=sys.stderr)
+            continue
+
         parent_cmd = data.get('parent_cmd') if isinstance(data, dict) else None
         is_active = parent_cmd in active_cmd_ids
         is_stale = (time.time() - filepath.stat().st_mtime) >= 86400
