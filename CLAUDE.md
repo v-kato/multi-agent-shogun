@@ -282,6 +282,54 @@ When processing large datasets (30+ items requiring individual web search, API c
 | D007 | `mkfs`, `dd if=`, `fdisk`, `mount`, `umount` | Disk/partition destruction |
 | D008 | `curl|bash`, `wget -O-|sh`, `curl|sh` (pipe-to-shell patterns) | Remote code execution |
 
+## D006 Extension: Windows Desktop Automation Ban (all agents)
+
+Process ownership never authorizes Windows desktop automation.
+Operating the Lord's Windows desktop environment is absolutely banned,
+even when no `kill`-family command is used, even when no
+process-signal exception of any kind applies, and even when the target
+process was spawned by the same invocation that is now acting on it.
+
+Banned, with no exception other than the one named below:
+
+- Moving the mouse cursor or issuing clicks (`SetCursorPos`,
+  `mouse_event`, `SendInput`, or equivalents)
+- Sending synthetic keyboard input (`SendKeys`, `keybd_event`, or
+  equivalents) — especially `Alt+F4`
+- Delivering window messages such as `WM_CLOSE` or `WM_QUIT`
+- Performing any of the three actions above against a window obtained
+  via window enumeration (e.g. `EnumWindows`) — enumeration does not
+  create a new exception; it is simply another way to locate a target
+  for an otherwise-banned action
+
+Reason: this is a physical environment the Lord may be using at the
+same time. Misidentifying the target window affects an unrelated
+application running on the Lord's machine.
+
+**Exception**: read-only inspection only — e.g. `GetWindowRect`,
+`CopyFromScreen` for screenshot capture, including against a window
+located via enumeration — is permitted, since it does not alter the
+Lord's desktop state.
+
+**Alternatives when GUI verification is genuinely needed**:
+1. Complete the operation inside WSL itself (e.g. install and use
+   `xdotool` inside WSLg) rather than reaching into Windows.
+2. If that is not possible, escalate through the chain of command
+   to request the Lord's visual verification. Only Shogun
+   communicates with the Lord directly. Ashigaru report to Gunshi
+   through their prescribed report-YAML and mailbox channel;
+   Gunshi report to Karo through the gunshi report-YAML and
+   mailbox channel; Karo records requests requiring the Lord's
+   decision in dashboard.md and must not send inbox messages to
+   Shogun.
+3. If a GUI process you started must be ended, Unix signal
+   termination is allowed only if every independently applicable
+   Unix-signal rule in this document permits it in full;
+   otherwise do not terminate the process automatically —
+   escalate through the role-specific escalation channel above
+   instead. Never end it via a Windows window-message or
+   synthetic keystroke.
+
 ## Tier 2: STOP-AND-REPORT (halt work, notify Karo/Shogun)
 
 | Trigger | Action |
