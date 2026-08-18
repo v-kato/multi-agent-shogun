@@ -490,6 +490,21 @@ this exception. This exclusion covers presence checks only —
 sending any signal other than 0 remains fully subject to every
 condition this exception imposes.
 
+Verification caution: before executing any tool capable of
+terminating or signaling a process in order to test or verify that
+tool's own behavior, confirm — before execution, not after, and by
+checking the target's provenance rather than assuming it — that the
+target is a fixture created by that verification's own isolated
+setup, never a canonical or production record or the live process
+it identifies. This holds no matter which branch above would
+otherwise permit the signal, and no matter whether the
+verification's setup and its signaling step run as the same
+invocation or, as under Branch 3, as separate ones: a tool that
+correctly refuses to act on an unrelated process still offers no
+protection against being pointed, by a verification step that
+skipped this check, at a real one that happens to satisfy every
+condition the tool enforces.
+
 ## D006 Extension: Windows Desktop Automation Ban (all agents)
 
 Process ownership never authorizes Windows desktop automation.
