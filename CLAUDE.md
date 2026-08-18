@@ -275,6 +275,17 @@ absolutely banned; there is no partial credit, and reasoning by analogy
 forbidden. No row other than D002 and D006 carries any exception — D001,
 D003-D005, D007, and D008 remain without exception, full stop.
 
+Before the wording of any change to a Tier 1 rule above is
+finalized — whether it amends, narrows, or extends an existing
+rule, or adds a new exception to one — inventory the existing code
+that wording would touch: search the codebase for every pattern it
+would newly permit, forbid, or leave ambiguous, and check each
+match against the proposed wording. If that check finds the
+wording would newly forbid code that has already been reviewed and
+found safe, treat that as a reason to reconsider the wording itself
+before finalizing it, rather than as proof the existing code is
+wrong.
+
 | ID | Forbidden Pattern | Reason |
 |----|-------------------|--------|
 | D001 | `rm -rf /`, `rm -rf /mnt/*`, `rm -rf /home/*`, `rm -rf ~` | Destroys OS, Windows drive, or home directory |
@@ -329,12 +340,12 @@ regardless of how the path was constructed).
 **Exception (D006-E1)**: Sending a Unix signal (e.g. via `kill`) to a
 directly spawned child process, or to a process group newly and
 independently isolated for that child, is permitted ONLY when every
-condition below holds for exactly one of the two branches. As with
+condition below holds for exactly one of the three branches. As with
 D002-E1, together they define a single verifiable ownership unit: the
 same trusted script/test invocation that spawns the target is the one
 that signals it.
 
-Conditions common to both branches:
+Conditions common to Branch 1 and Branch 2:
 
 (a) The same script/test invocation sending the signal is the one that
     directly spawned the target as its own child/job — not a descendant
@@ -371,6 +382,82 @@ multi-process signal D006-E1 permits, precisely because it is scoped
 to that isolated, self-created group alone. No other negative or
 group target is permitted.
 
+Branch 3 (separate-invocation lifecycle management): Branch 1 and
+Branch 2 both assume the invocation sending the signal is the same
+invocation that spawned the target. Some legitimate designs cannot
+satisfy that assumption by construction: a tool that starts a
+long-lived background process through one script or command and
+stops it through a separate, later script or command necessarily
+runs the spawning step and the signaling step as two different
+invocations, neither of which may still be running when the other
+executes. Branch 3 exists only for that structural case; it is not
+a general substitute for Branch 1 or Branch 2, and whenever the
+same-invocation structure is actually available, Branch 1 or
+Branch 2 must be used instead. Branch 3 does not draw on the
+conditions common to Branch 1 and Branch 2 above — it carries its
+own complete set of conditions, all of which must hold:
+
+(a) The tool's production code path — both when the spawning step
+    records the identifier and when the signaling step reads it —
+    uses only the tool's one documented canonical record location;
+    no flag, environment variable, or other caller-supplied input
+    may redirect either step to a different path. A test harness
+    that genuinely needs an isolated record does so through a
+    separate, structurally distinct entry point that the production
+    path never calls and that can never be reached through a
+    production invocation — never through a runtime condition, such
+    as an environment variable, that a production invocation could
+    also satisfy by accident. Before trusting the record, the
+    signaling step validates it in full — every field the tool's
+    documentation requires, present exactly once, in the documented
+    format, with no unrecognized field — and treats a record that
+    fails this validation, or that cannot be read at all, as
+    inconclusive rather than absent: it MUST NOT delete, overwrite,
+    or otherwise act on that record, and MUST stop without
+    signaling.
+(b) The spawning invocation captures the identifier directly from
+    its spawn primitive's own return value — under the same rule
+    Branch 1 and Branch 2's condition (b) places on same-invocation
+    spawning — and holds it, unaltered, in a dedicated variable for
+    the rest of the invocation. Before installing the record it may
+    still gather any other data the record itself must hold (for
+    instance, an identity signal condition (d) will later
+    corroborate against), but the captured identifier itself must
+    come only from that held variable, never from a fresh or
+    repeated read of the spawn primitive or any other source. Once
+    that data is gathered, and before the spawning invocation
+    reports success to whatever launched it, it installs the
+    complete record atomically, using a creation method a
+    concurrent reader can never observe half-written (for instance,
+    writing to a temporary file with restrictive permissions and
+    then renaming it into place).
+(c) Before doing anything else, the signaling invocation re-reads
+    the record — never a value carried over from an earlier read —
+    and uses a presence-only check to confirm that a process or
+    group still exists under the identifier it names. If none
+    exists, this is a no-op: the invocation MUST NOT send any
+    signal beyond that presence-only check, and MAY discard the
+    stale record.
+(d) Before sending a signal capable of reaching more than the
+    intended target — which matters most for a process-group
+    target, since it reaches every member of the group — the
+    signaling invocation confirms the running target's identity
+    against what the spawning invocation recorded, using an exact,
+    normalized comparison of the full command line rather than a
+    keyword or substring match, corroborated by a second,
+    independent signal such as process start time. This comparison
+    reads the target only once it has reached a stable, post-launch
+    state — never a transient command line captured before the
+    spawned program has finished replacing it — since
+    operating-system identifiers are recycled, and a comparison
+    performed too early, or satisfied by only a partial match, can
+    be satisfied by an unrelated process that merely happens to
+    share a keyword or to run momentarily under a generic launcher
+    command. The signal targets exactly the identifier confirmed
+    this way — a single PID, or, for a process group, that PGID in
+    the group-targeting form Branch 2 describes; broadcast targets
+    remain forbidden exactly as under Branch 1 and Branch 2.
+
 Name-based or enumeration-based termination (`pkill`, `killall`,
 `kill $(pgrep …)`) remains absolutely forbidden, as do `tmux
 kill-server` and `tmux kill-session`.
@@ -382,6 +469,35 @@ keystrokes, or delivering window messages within the Lord's Windows
 desktop environment — is a different action against a different
 target and is never authorized by this exception, regardless of
 whether the target window happens to belong to a self-spawned process.
+
+Signal-0 exclusion: A call that sends signal 0 (e.g. `kill -0`, or
+an equivalent existence check in another language) to test whether
+a process or process group still exists is not a "signal" for the
+purposes of D006 or this exception. Signal 0 delivers nothing to
+the target and cannot terminate, interrupt, stop, or otherwise
+alter it — operating systems define it purely as a
+permission-and-existence probe. Using it to check whether a target
+is still alive, including as a required step under Branch 1, 2, or
+3 above, is therefore always permitted on its own terms and never
+by itself triggers any condition in the banned-pattern table or in
+this exception. This exclusion covers presence checks only —
+sending any signal other than 0 remains fully subject to every
+condition this exception imposes.
+
+Verification caution: before executing any tool capable of
+terminating or signaling a process in order to test or verify that
+tool's own behavior, confirm — before execution, not after, and by
+checking the target's provenance rather than assuming it — that the
+target is a fixture created by that verification's own isolated
+setup, never a canonical or production record or the live process
+it identifies. This holds no matter which branch above would
+otherwise permit the signal, and no matter whether the
+verification's setup and its signaling step run as the same
+invocation or, as under Branch 3, as separate ones: a tool that
+correctly refuses to act on an unrelated process still offers no
+protection against being pointed, by a verification step that
+skipped this check, at a real one that happens to satisfy every
+condition the tool enforces.
 
 ## D006 Extension: Windows Desktop Automation Ban (all agents)
 
