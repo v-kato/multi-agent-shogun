@@ -281,6 +281,17 @@ absolutely banned; there is no partial credit, and reasoning by analogy
 forbidden. No row other than D002 and D006 carries any exception — D001,
 D003-D005, D007, and D008 remain without exception, full stop.
 
+Before the wording of any change to a Tier 1 rule above is
+finalized — whether it amends, narrows, or extends an existing
+rule, or adds a new exception to one — inventory the existing code
+that wording would touch: search the codebase for every pattern it
+would newly permit, forbid, or leave ambiguous, and check each
+match against the proposed wording. If that check finds the
+wording would newly forbid code that has already been reviewed and
+found safe, treat that as a reason to reconsider the wording itself
+before finalizing it, rather than as proof the existing code is
+wrong.
+
 | ID | Forbidden Pattern | Reason |
 |----|-------------------|--------|
 | D001 | `rm -rf /`, `rm -rf /mnt/*`, `rm -rf /home/*`, `rm -rf ~` | Destroys OS, Windows drive, or home directory |
