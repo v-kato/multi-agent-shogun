@@ -465,6 +465,20 @@ desktop environment — is a different action against a different
 target and is never authorized by this exception, regardless of
 whether the target window happens to belong to a self-spawned process.
 
+Signal-0 exclusion: A call that sends signal 0 (e.g. `kill -0`, or
+an equivalent existence check in another language) to test whether
+a process or process group still exists is not a "signal" for the
+purposes of D006 or this exception. Signal 0 delivers nothing to
+the target and cannot terminate, interrupt, stop, or otherwise
+alter it — operating systems define it purely as a
+permission-and-existence probe. Using it to check whether a target
+is still alive, including as a required step under Branch 1, 2, or
+3 above, is therefore always permitted on its own terms and never
+by itself triggers any condition in the banned-pattern table or in
+this exception. This exclusion covers presence checks only —
+sending any signal other than 0 remains fully subject to every
+condition this exception imposes.
+
 ## D006 Extension: Windows Desktop Automation Ban (all agents)
 
 Process ownership never authorizes Windows desktop automation.
