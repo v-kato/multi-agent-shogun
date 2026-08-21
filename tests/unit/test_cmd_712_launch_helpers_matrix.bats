@@ -538,7 +538,7 @@ $coverageOkCanon = $false
 # N-3: 正典ファイルの承認済みSHA256(cmd_718策定時点でsha256sum実測・本テスト
 # ファイル側に固定)。正典ファイルのみを書き換えてこの定数を同時に更新しなければ、
 # 以降のtoken比較結果に関わらずT9はここでFAILする(正典改竄によるtest無力化への対抗)。
-$expectedCanonicalHash = 'BFC200DB532F668AAF95FE07C46A7BC4B93FFC944DECA280C784B04A11A5D62D'
+$expectedCanonicalHash = 'C322433B05BEF6D1546BC286CC0C33B5F9A7CA20861B08563CDFB6364A861F4D'
 
 $startMarker = '# Step 0: shutdown existing Electron'
 $endMarker = '# Step 1: git fetch'

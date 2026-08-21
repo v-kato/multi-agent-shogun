@@ -1,4 +1,4 @@
-<#
+﻿<#
     ★★★ セキュリティ上重要な正典ファイル (N-1・cmd_718・redo1で範囲拡大) ★★★
 
     本ファイルはTLC-cms launch.ps1の「ファイル先頭(top-level statement
