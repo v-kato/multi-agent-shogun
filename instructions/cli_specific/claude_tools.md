@@ -87,6 +87,6 @@ All agents: Follow the Session Start / Recovery procedure in CLAUDE.md. Key step
 
 1. Identify self: `tmux display-message -t "$TMUX_PANE" -p '#{@agent_id}'`
 2. `mcp__memory__read_graph` — restore rules, preferences, lessons
-3. Read your instructions file (shogun→instructions/shogun.md, karo→instructions/karo.md, ashigaru→instructions/ashigaru.md)
+3. Read your instructions file (shogun→instructions/shogun.md, karo→instructions/generated/karo.md, ashigaru→instructions/ashigaru.md)
 4. Rebuild state from primary YAML data (queue/, tasks/, reports/)
 5. Review forbidden actions, then start work

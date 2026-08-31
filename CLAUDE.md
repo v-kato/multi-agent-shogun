@@ -67,7 +67,7 @@ language:
 1. Identify self: `tmux display-message -t "$TMUX_PANE" -p '#{@agent_id}'`
 2. `mcp__memory__read_graph` — restore rules, preferences, lessons **(shogun/karo/gunshi only. ashigaru skip this step — task YAML is sufficient)**
 3. **Read `memory/MEMORY.md`** (shogun only) — persistent cross-session memory. If file missing, skip. *Claude Code users: this file is also auto-loaded via Claude Code's memory feature.*
-4. **Read your instructions file**: shogun→`instructions/shogun.md`, karo→`instructions/karo.md`, ashigaru→`instructions/ashigaru.md`, gunshi→`instructions/gunshi.md`. **NEVER SKIP** — even if a conversation summary exists. Summaries do NOT preserve persona, speech style, or forbidden actions.
+4. **Read your instructions file**: shogun→`instructions/shogun.md`, karo→`instructions/generated/karo.md`, ashigaru→`instructions/ashigaru.md`, gunshi→`instructions/gunshi.md`. **NEVER SKIP** — even if a conversation summary exists. Summaries do NOT preserve persona, speech style, or forbidden actions.
 4. Rebuild state from primary YAML data (queue/, tasks/, reports/)
 5. Review forbidden actions, then start work
 
@@ -156,9 +156,9 @@ Special cases (CLI commands sent via `tmux send-keys`):
 
 When you receive `inboxN` (e.g. `inbox3`):
 1. `Read queue/inbox/{your_id}.yaml`
-2. Find all entries with `read: false`
+2. Find all entries with `read: false` (note their `id` values)
 3. Process each message according to its `type`
-4. Update each processed entry: `read: true` (use Edit tool)
+4. `bash scripts/inbox_lock.sh mark-read {your_id} --id <all noted ids>`
 5. Resume normal workflow
 
 ### MANDATORY Post-Task Inbox Check
@@ -188,7 +188,7 @@ Race condition is eliminated: the context reset wipes old context. Agent re-read
 |-----------|--------|--------|
 | Ashigaru → Gunshi | Report YAML + inbox_write | Quality check & dashboard aggregation |
 | Gunshi → Karo | Report YAML + inbox_write | Quality check result + strategic reports |
-| Karo → Shogun/Lord | dashboard.md update only | **inbox to shogun FORBIDDEN** — prevents interrupting Lord's input |
+| Karo → Shogun/Lord | dashboard.md update only(+🚨要対応へ【将軍手番】項目を**新規掲載した時のみ**クロスセッション通知1通) | **inbox to shogun FORBIDDEN**(継続) — prevents interrupting Lord's input。クロスセッション通知はinbox禁止の解除ではなく別経路の限定的追加である。条件・定型文・台帳・歯止めは各エージェントのinstructions内「家老→将軍 クロスセッション通知 (cmd_728)」節を正本とする |
 | Karo → Gunshi | YAML + inbox_write | Strategic task or quality check delegation |
 | Top → Down | YAML + inbox_write | Standard wake-up |
 
@@ -546,6 +546,20 @@ Lord's desktop state.
    escalate through the role-specific escalation channel above
    instead. Never end it via a Windows window-message or
    synthetic keystroke.
+
+## 参照ファイル切替時の移行チェック (cmd_704)
+
+cmdがエージェントの正本参照ファイルを切り替える際(例: cmd_693での
+`instructions/karo.md` → `instructions/generated/karo.md`)、旧ファイル
+の内容が新ファイルへ過不足なく引き継がれているかを、見出し単位ではなく
+内容・command・path・数値単位で照合することは**必須手順**である。
+cmd_704では、cmd_693の切替後に`bash scripts/ntfy.sh`の具体的な実行
+手順がサイレントに欠落していたことが判明した: 通知自体は継続していた
+が、ntfy.sh実行手順の喪失によりoutbound tagが付与されずlistenerを
+素通りし、将軍への意図しないnudgeが3件発生する形で症状が表面化した。
+これは上記Tier 1事案3件(cmd_682, cmd_686, cmd_692)と同じ根本原因
+(変更前に影響範囲を数えなかったこと)であり、参照切替系のcmdも同じ
+基準で扱う。
 
 ## Tier 2: STOP-AND-REPORT (halt work, notify Karo/Shogun)
 

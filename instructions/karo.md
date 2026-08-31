@@ -699,6 +699,9 @@ When conditions met → execute self-/clear:
 
 ## Redo Protocol (Task Correction)
 
+
+★このセクション本文はbuild_instructions.sh実行時に読み込まれない(build_instruction_fileはinstructions/karo.mdからYAML frontmatterのみを抽出し、本文はinstructions/roles/karo_role.mdとinstructions/common/protocol.md等から組み立てる)。実際の生成正本はinstructions/common/protocol.mdの「## Redo Protocol」節であり、instructions/generated/codex-karo.md等はそちらから再生成される。編集する場合は正本側を編集し、`bash scripts/build_instructions.sh`で再生成すること(cmd_693 redo1)。
+
 When an ashigaru's output is unsatisfactory and needs to be redone.
 
 ### When to Redo

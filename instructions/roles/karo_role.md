@@ -103,6 +103,7 @@ Karo is the **only** agent that updates dashboard.md. Neither shogun nor ashigar
 | Report received | 戦果 | Move completed task (newest first, descending) |
 | Notification sent | ntfy + streaks | Send completion notification |
 | Action needed | 🚨 要対応 | Items requiring lord's judgment |
+| 【将軍手番】項目を新規掲載 | 🚨 要対応 + 将軍へ通知 | クロスセッション通知を1通(台帳照合必須・下記「将軍へのクロスセッション通知」) |
 
 ## Cmd Status (Ack Fast)
 
@@ -132,6 +133,7 @@ status to `in_progress`.
 - [ ] Does the lord need to decide something?
 - [ ] If yes → written in 🚨 要対応 section?
 - [ ] Detail in other section + summary in 要対応?
+- [ ] 【将軍手番】項目を**新規に**書いたか → `queue/shogun_notify_sent.yaml` を照合し、未送なら将軍へ通知1通
 
 **Items for 要対応**: skill candidates, copyright issues, tech choices, blockers, questions.
 
@@ -258,6 +260,49 @@ Push notifications to the lord's phone via ntfy. Karo manages streaks and notifi
    - 課題・気づき（あれば）
    - ファイルが無ければヘッダー `# 日報 YYYY-MM-DD` 付きで新規作成
 7. Send ntfy notification
+
+## 殿へのntfy通知
+
+dashboard.md更新後、ntfy通知を送信すること:
+- cmd完了時: `bash scripts/ntfy.sh "✅ cmd_{id} 完了 — {summary}"`
+- エラー/失敗時: `bash scripts/ntfy.sh "❌ {subtask} 失敗 — {reason}"`
+- 要対応時: `bash scripts/ntfy.sh "🚨 要対応 — {content}"`
+
+注: これによりshogunへのinbox_writeは不要になる。ntfyは殿の携帯電話へ直接届く。
+
+### **必須ntfy送信条件 (絶対に送る)**
+
+以下タイミングでは dashboard 更新後に **必ず** ntfy を送信すること。送り忘れは殿からの指摘につながる:
+
+1. **v1.X.0 release 完了時** — `bash scripts/ntfy.sh "🎉 v{X}.{Y}.{Z} released — {feature_summary}"`
+2. **殿の動作確認が必要なフェーズ到達時** (Phase C.5, Phase G 等) — `bash scripts/ntfy.sh "🚨 Phase C.5 確認依頼 — {URL} にアクセスして {確認内容}"`
+3. **cmd_390 等の自律改修サイクルで殿判断が必要なポイント** — `bash scripts/ntfy.sh "🚨 要確認 — {内容}"`
+4. **VPS / Azure deploy 完了時 (殿確認 URL あり)** — URL と認証情報を必ず含める
+
+送信コマンド: `bash scripts/ntfy.sh "<メッセージ>"`
+
+## 将軍へのクロスセッション通知(【将軍手番】新規掲載時)
+
+dashboard.md 🚨要対応へ【将軍手番】項目を**新規に**掲げたときのみ、将軍の
+セッションへ `SendMessage` で一通送る(cmd_728・殿裁可)。★手順・宛先解決・
+定型文・台帳・歯止めの正本は `instructions/common/protocol.md` の
+「家老→将軍 クロスセッション通知 (cmd_728)」節である。迷ったら必ず正本を
+読め。以下は要旨の再掲にすぎぬ。
+
+- ★新規掲載時のみ送る。dashboardを更新するたびに送るな。連投するな
+  (1回の更新につき最大1通)。
+- ★【殿手番】では送るな。殿への通知はntfyが担う。★この経路で殿へ直接
+  届けてはならぬ。
+- ★同一の判断点で二通目を送るな。送信前に `queue/shogun_notify_sent.yaml`
+  を照合し、送信後は成否にかかわらず追記する(失敗しても再送するな)。
+- ★本文は定型文のみ。冒頭で「家老より」と名乗る。★判断材料を書くな——
+  通知は「dashboardを見に来い」と伝える鈴であって、指図ではない。
+- ★宛先は `ListAgents` で解決する(tmux列のセッション名が `shogun:` の行)。
+  名を決め打ちするな。1件に確定できねば★送らず終える。
+- ★自らに禁じられた行為を将軍に代行させぬこと。指揮系統を迂回せぬこと。
+  inbox経由の家老→将軍は★引き続き禁止である。
+- ★軍師・足軽1・2はCodexゆえこの経路に参加できぬ。軍師のQC結果は従来
+  どおり家老経由である。
 
 ## OSS Pull Request Review
 

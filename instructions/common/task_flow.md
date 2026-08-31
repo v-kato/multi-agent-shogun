@@ -11,7 +11,7 @@ Lord: command → Shogun: write YAML → inbox_write → Karo: decompose → inb
 Status is defined per YAML file type. **Keep it minimal. Simple is best.**
 
 Fixed status set (do not add casually):
-- `queue/shogun_to_karo.yaml`: `pending`, `in_progress`, `done`, `cancelled`
+- `queue/shogun_to_karo.yaml`: `pending`, `in_progress`, `done`, `cancelled`, `paused`
 - `queue/tasks/ashigaruN.yaml`: `assigned`, `blocked`, `done`, `failed`
 - `queue/tasks/pending.yaml`: `pending_blocked`
 - `queue/ntfy_inbox.yaml`: `pending`, `processed`
@@ -38,31 +38,77 @@ Meanings and allowed/forbidden actions (short):
   - Allowed: read-only (history)
   - Forbidden: continuing work under this cmd (use a new cmd instead)
 
+- `paused`: ACKed but deliberately stopped, not abandoned
+  - Allowed: Karo/Shogun resumes by moving back to `in_progress` (or
+    `pending` if re-ACK is needed) when priority returns
+  - Forbidden: continuing work under this cmd while still `paused`;
+    archiving it (stays in the active file — see Archive Rule below)
+
 ### Archive Rule
 
-The active queue file (`queue/shogun_to_karo.yaml`) must only contain
-`pending` and `in_progress` entries. All other statuses are archived.
+The active queue file (`queue/shogun_to_karo.yaml`) must contain
+`pending`, `in_progress`, and `paused` entries. Only `done` and
+`cancelled` are archived.
 
-When a cmd reaches a terminal status (`done`, `cancelled`, `paused`),
-Karo must move the entire YAML entry to `queue/shogun_to_karo_archive.yaml`.
+`paused` is deliberately kept in the active file even though the work
+is stopped: archiving it would make stopped-but-not-abandoned work
+invisible. This is the exact failure the Lord hit on 2026-08-20 — 8
+unclosed cmds sitting where nobody could see them because they had
+been archived out of the active file. Paused work must stay visible
+until it is resumed or explicitly cancelled.
+
+When a cmd reaches `done` or `cancelled` (the only truly terminal
+statuses — the work is finished or will never resume), Karo must move
+the entire YAML entry to `queue/shogun_to_karo_archive.yaml`.
 
 | Status | In active file? | Action |
 |--------|----------------|--------|
 | pending | YES | Keep |
 | in_progress | YES | Keep |
+| paused | YES | Keep (stopped but not abandoned; stays visible) |
 | done | NO | Move to archive |
 | cancelled | NO | Move to archive |
-| paused | NO | Move to archive (restore to active when resumed) |
 
 **Canonical statuses (exhaustive list — do NOT invent others)**:
 - `pending` — not started
 - `in_progress` — acknowledged, being worked
 - `done` — complete (covers former "completed", "superseded", "active")
-- `cancelled` — intentionally stopped, will not resume
-- `paused` — stopped by Lord's decision, may resume later
+- `cancelled` — intentionally stopped, will not resume (covers former
+  "deprecated")
+- `paused` — ACKed but deliberately stopped, not abandoned, may
+  resume later (covers former "on_hold", "deprioritized"). Stays in
+  the active file — never archived while still `paused` (see Archive
+  Rule above).
 
-Any other status value (e.g., `completed`, `active`, `superseded`) is
-forbidden. If found during archive, normalize to the canonical set above.
+Any other status value (e.g., `completed`, `active`, `superseded`,
+`on_hold`, `deprioritized`, `deprecated`) is forbidden. If found
+during archive or audit, normalize to the canonical set above and
+record the original value + mapping reason on the entry (e.g. in a
+`karo_note` field) rather than silently overwriting it.
+
+### Status Vocabulary Authority (established cmd_714, 2026-08-20)
+
+An audit (cmd_714, 2026-08-20) found three different status
+vocabularies in disagreement at the same time: this file's own "Fixed
+status set" above (4 values, no `paused`) vs. its own "Canonical
+statuses" list (5 values, `paused` included) vs. `scripts/slim_yaml.py`,
+whose `ACTIVE_STATUSES` has no `paused` at all (only `blocked`) while
+its separate `TERMINAL_STATUSES` does include `paused` vs. the live
+`queue/shogun_to_karo.yaml`, which had 3 commands (`cmd_493`,
+`cmd_349`, `cmd_361`) using `on_hold` / `deprioritized` / `deprecated`
+— none of which appear in any canonical list anywhere. cmd_710 Phase
+B's redo cycle failed 3 rounds in a row specifically on cmd_493's
+classification wording, precisely because the three "source of
+truth" documents didn't agree with each other.
+
+**Resolution: this file (`instructions/common/task_flow.md`) is the
+single source of truth for status vocabulary.** Code
+(`scripts/slim_yaml.py` and any future equivalent) must follow the
+vocabulary defined here, not the reverse. When code and this file
+disagree, either fix the code to match this file, or propose a change
+to this file first (subject to Shogun approval per the Destructive
+Operation Safety / broad-impact-change norm) — never just let the
+code's current behavior stand as a silent second vocabulary.
 
 **Karo rule (ack fast)**:
 - The moment Karo starts processing a cmd (after reading it), update that cmd status:
@@ -93,6 +139,25 @@ Note:
 - Normally, "idle" is a UI state (no active task), not a YAML status value.
 - Exception (placeholder only): `status: idle` is allowed **only** when `task_id: null` (clean start template written by `shutsujin_departure.sh --clean`).
   - In that state, the file is a placeholder and should be treated as "no task assigned yet".
+
+### working_dir フィールド (作業ツリー排他制御, cmd_695)
+
+`queue/tasks/ashigaruN.yaml` の `task:` ブロックが持てる任意フィールド。
+
+- **値がある場合**: そのタスクが占有する作業ツリーの絶対パス
+  (例: git checkout・ローカルサーバ起動・実機検証を伴うタスク)。
+- **省略した場合**: そのタスクは作業ツリーを占有しない、という意味。
+  既存タスクYAML(本フィールド導入前に書かれたもの)は全てこの意味
+  として扱われ、遡及的な付与は不要かつ行わない。
+- **`working_dir_released: true`**: `status: done` または `status:
+  failed` と同時に足軽が明記する。そのworking_dirを使うプロセス
+  (dev server・electron等)を残さず終了した場合に限り付与する。
+  無ければ `done`/`failed` いずれになっても「占有継続中」として
+  扱われる(fail-safe)。
+
+家老の割当時チェック規則(割当先自身の検査・`failed` の扱い・
+path正規化を含む)は `instructions/common/protocol.md` の
+「Task Working Directory Exclusivity」参照。
 
 ### Pending Tasks (Karo-managed): `queue/tasks/pending.yaml`
 
