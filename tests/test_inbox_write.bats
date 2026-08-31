@@ -417,7 +417,10 @@ EOF
 
 @test "T-012: auto-create inbox directory → missing queue/inbox/ directory is created" {
     # queue/inbox/ ディレクトリを削除
-    rm -rf "$TEST_INBOX_DIR"
+    # setup() 直後で中身は空ゆえ rmdir で足りる。
+    # $TEST_INBOX_DIR は $TEST_TMPDIR からの連結パスであり、
+    # D002-E1(b)(c) を満たさぬため rm -rf を用いてはならぬ。
+    rmdir "$TEST_INBOX_DIR"
 
     # ディレクトリが存在しないことを確認
     [ ! -d "$TEST_INBOX_DIR" ]
@@ -451,7 +454,10 @@ EOF
 }
 
 @test "T-014: lock directory is released after python failure" {
-    rm -rf "$TEST_TMPDIR/.venv"
+    # setup() が張った .venv シンボリックリンクを外す。
+    # "$TEST_TMPDIR/.venv" は連結パスゆえ D002-E1 では消せぬが、
+    # ここで外すのはリンク1本であり再帰削除を要さぬ。
+    rm -f "$TEST_TMPDIR/.venv"
     mkdir -p "$TEST_TMPDIR/.venv/bin"
     cat > "$TEST_TMPDIR/.venv/bin/python3" <<'PYFAIL'
 #!/usr/bin/env bash
