@@ -1177,11 +1177,17 @@ find_agent_for_model() {
     candidates=$("$CLI_ADAPTER_PROJECT_ROOT/.venv/bin/python3" -c "
 import yaml, sys
 
+def _base_model(m):
+    # --effort等のCLIフラグを除いたベースmodel id（先頭トークン）を返す
+    m = (m or '').strip()
+    return m.split()[0] if m else ''
+
 try:
     with open('${settings}') as f:
         cfg = yaml.safe_load(f) or {}
     cli_cfg = cfg.get('cli', {})
     agents = cli_cfg.get('agents', {})
+    target = _base_model('${recommended_model}')
 
     results = []
     for agent_id, spec in agents.items():
@@ -1190,8 +1196,8 @@ try:
             continue
         if not isinstance(spec, dict):
             continue
-        agent_model = spec.get('model', '')
-        if agent_model == '${recommended_model}':
+        agent_model = _base_model(spec.get('model', ''))
+        if agent_model == target:
             results.append(agent_id)
 
     # 番号順にソート（ashigaru1, ashigaru2, ...）
@@ -1249,15 +1255,22 @@ except Exception:
     local req_bloom
     req_bloom=$("$CLI_ADAPTER_PROJECT_ROOT/.venv/bin/python3" -c "
 import yaml, sys
+
+def _base_model(m):
+    # --effort等のCLIフラグを除いたベースmodel id（先頭トークン）を返す
+    m = (m or '').strip()
+    return m.split()[0] if m else ''
+
 try:
     with open('${settings}') as f:
         cfg = yaml.safe_load(f) or {}
     tiers = cfg.get('capability_tiers')
-    if not tiers or not isinstance(tiers, dict):
-        print('6'); sys.exit(0)
-    spec = tiers.get('${recommended_model}')
+    target = _base_model('${recommended_model}')
+    spec = tiers.get(target) if isinstance(tiers, dict) else None
     if not spec or not isinstance(spec, dict):
-        print('6'); sys.exit(0)
+        # capability_tiers未登録モデル → 制約なし（switch不要のPhase 2を
+        # 任意tierの空き足軽に対して素通しし、意図しない下位tier降格を防ぐ）
+        print('0'); sys.exit(0)
     mb = spec.get('max_bloom', 6)
     print(mb if isinstance(mb, int) and 1 <= mb <= 6 else 6)
 except Exception:
@@ -1268,19 +1281,30 @@ except Exception:
     local all_agents_info
     all_agents_info=$("$CLI_ADAPTER_PROJECT_ROOT/.venv/bin/python3" -c "
 import yaml
+
+def _base_model(m):
+    # --effort等のCLIフラグを除いたベースmodel id（先頭トークン）を返す。
+    # 出力行はbash側で read -r fb_agent fb_model fb_bloom によりスペース区切りで
+    # 分割されるため、フラグ付きの生文字列をそのまま出すとフィールドがずれる。
+    m = (m or '').strip()
+    return m.split()[0] if m else ''
+
 try:
     with open('${settings}') as f:
         cfg = yaml.safe_load(f) or {}
     agents = cfg.get('cli', {}).get('agents', {})
     tiers = cfg.get('capability_tiers', {})
+    if not isinstance(tiers, dict):
+        tiers = {}
+    target = _base_model('${recommended_model}')
     results = []
     for agent_id, spec in agents.items():
         if not agent_id.startswith('ashigaru'):
             continue
         if not isinstance(spec, dict):
             continue
-        amodel = spec.get('model', '')
-        if amodel == '${recommended_model}':
+        amodel = _base_model(spec.get('model', ''))
+        if amodel == target:
             continue
         tier_spec = tiers.get(amodel, {})
         ab = tier_spec.get('max_bloom', 6) if isinstance(tier_spec, dict) else 6
