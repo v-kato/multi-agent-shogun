@@ -89,11 +89,11 @@ bloom_tasks:
     bloom_level: 3
     category: apply
     description: |
-      tests/fixtures/ に settings_spark_only.yaml を作成せよ。
-      内容: capability_tiers に gpt-5.3-codex-spark (max_bloom: 3, cost_group: chatgpt_pro) のみ定義。
+      tests/fixtures/ に settings_luna_only.yaml を作成せよ。
+      内容: capability_tiers に gpt-6-luna (max_bloom: 3, cost_group: chatgpt_pro) のみ定義。
       bloom_routing: "off" を含める。
     expected_output_type: file_created
-    verifiable_condition: "file exists AND yaml valid AND only spark in capability_tiers"
+    verifiable_condition: "file exists AND yaml valid AND only gpt-6-luna in capability_tiers"
     difficulty: easy
     notes: "既存YAMLパターンの適用。"
 
@@ -102,7 +102,7 @@ bloom_tasks:
     category: apply
     description: |
       以下のbashスクリプトを実行し、結果を /tmp/bloom_test_output.txt に保存せよ:
-      source lib/cli_adapter.sh && get_capability_tier "gpt-5.3-codex-spark"
+      source lib/cli_adapter.sh && get_capability_tier "gpt-6-luna"
       (プロジェクトルートから実行すること)
     expected_output_type: command_output
     verifiable_condition: "file /tmp/bloom_test_output.txt contains '3'"
@@ -180,13 +180,13 @@ bloom_tasks:
     expected_output_type: comparative_evaluation
     verifiable_condition: "response includes: 3 options evaluated, recommendation with 3+ criteria, trade-offs acknowledged"
     difficulty: hard
-    notes: "L5の典型。比較+根拠つき推奨が必要。Sparkでは3案の深い比較が難しい。"
+    notes: "L5の典型。比較+根拠つき推奨が必要。gpt-6-lunaでは3案の深い比較が難しい。"
 
   - id: L5-02
     bloom_level: 5
     category: evaluate
     description: |
-      VPS での Bloom routing テスト用に ashigaru1-3=Codex-Spark, ashigaru4-5=Sonnet,
+      VPS での Bloom routing テスト用に ashigaru1-3=Codex(gpt-6-luna), ashigaru4-5=Sonnet,
       ashigaru6-7=Opus の混合CLI設定を提案しているが、この設計の妥当性を評価せよ。
       以下の観点を含めること:
       (1) 各Bloomレベルに対するカバレッジ (2) 並列処理能力 (3) コスト効率
@@ -201,8 +201,8 @@ bloom_tasks:
     category: evaluate
     description: |
       Bloom Taxonomy に基づくモデルルーティングの有効性について、以下の主張を評価せよ:
-      「L5タスク (設計評価) を gpt-5.3-codex-spark (max_bloom=3) で実行しても、
-      プロンプトを工夫すれば品質は claude-sonnet-4-6 と変わらない」
+      「L5タスク (設計評価) を gpt-6-luna (max_bloom=3) で実行しても、
+      プロンプトを工夫すれば品質は sonnet と変わらない」
       この主張の妥当性を、理論的根拠と実証的検証方法を含めて評価せよ。
     expected_output_type: argument_evaluation
     verifiable_condition: "evaluation includes: capability limitation argument, empirical test proposal, nuanced conclusion"
@@ -244,7 +244,7 @@ bloom_tasks:
     expected_output_type: architecture_design
     verifiable_condition: "design includes: parallel decision path, logging mechanism, statistical comparison, zero-latency constraint"
     difficulty: expert
-    notes: "安全な実験設計。Sparkでは要件の複合を処理しきれない。"
+    notes: "安全な実験設計。gpt-6-lunaでは要件の複合を処理しきれない。"
 
   - id: L6-03
     bloom_level: 6

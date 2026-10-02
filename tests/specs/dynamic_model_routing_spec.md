@@ -50,10 +50,10 @@
 
 | TC ID | 要件 | レベル | 入力 | 期待値 |
 |---|---|---|---|---|
-| TC-DMR-010 | FR-02 Spark → 3 | L1 | model="gpt-5.3-codex-spark" | "3" |
-| TC-DMR-011 | FR-02 Codex 5.3 → 4 | L1 | model="gpt-5.3" | "4" |
-| TC-DMR-012 | FR-02 Sonnet → 5 | L1 | model="claude-sonnet-4-5-20250929" | "5" |
-| TC-DMR-013 | FR-02 Opus → 6 | L1 | model="claude-opus-4-6" | "6" |
+| TC-DMR-010 | FR-02 gpt-6-luna → 3 | L1 | model="gpt-6-luna" | "3" |
+| TC-DMR-011 | FR-02 gpt-6-sol → 4 | L1 | model="gpt-6-sol" | "4" |
+| TC-DMR-012 | FR-02 Sonnet → 5 | L1 | model="sonnet" | "5" |
+| TC-DMR-013 | FR-02 Opus → 6 | L1 | model="opus" | "6" |
 | TC-DMR-014 | FR-02 未定義モデル → 6 | L1 | model="unknown-model" | "6" |
 | TC-DMR-015 | FR-02 セクション不在 → 6 | L1 | capability_tiers未定義 | "6" |
 | TC-DMR-016 | FR-02 YAML破損 → 6 | L1 | 壊れたYAML | "6" |
@@ -63,12 +63,12 @@
 
 | TC ID | 要件 | レベル | 入力 | 期待値 |
 |---|---|---|---|---|
-| TC-DMR-020 | FR-03 L1 → Spark | L1 | bloom_level=1 | "gpt-5.3-codex-spark" |
-| TC-DMR-021 | FR-03 L2 → Spark | L1 | bloom_level=2 | "gpt-5.3-codex-spark" |
-| TC-DMR-022 | FR-03 L3 → Spark | L1 | bloom_level=3 | "gpt-5.3-codex-spark" |
-| TC-DMR-023 | FR-03 L4 → Codex 5.3 | L1 | bloom_level=4 | "gpt-5.3" |
-| TC-DMR-024 | FR-03 L5 → Sonnet | L1 | bloom_level=5 | "claude-sonnet-4-5-20250929" |
-| TC-DMR-025 | FR-03 L6 → Opus | L1 | bloom_level=6 | "claude-opus-4-6" |
+| TC-DMR-020 | FR-03 L1 → gpt-6-luna | L1 | bloom_level=1 | "gpt-6-luna" |
+| TC-DMR-021 | FR-03 L2 → gpt-6-luna | L1 | bloom_level=2 | "gpt-6-luna" |
+| TC-DMR-022 | FR-03 L3 → gpt-6-luna | L1 | bloom_level=3 | "gpt-6-luna" |
+| TC-DMR-023 | FR-03 L4 → gpt-6-sol | L1 | bloom_level=4 | "gpt-6-sol" |
+| TC-DMR-024 | FR-03 L5 → Sonnet | L1 | bloom_level=5 | "sonnet" |
+| TC-DMR-025 | FR-03 L6 → Opus | L1 | bloom_level=6 | "opus" |
 | TC-DMR-026 | FR-03 セクション不在 → 空 | L1 | capability_tiers未定義 | "" (空文字列) |
 | TC-DMR-027 | FR-03 範囲外(0) → exit 1 | L1 | bloom_level=0 | exit code 1 |
 | TC-DMR-028 | FR-03 範囲外(7) → exit 1 | L1 | bloom_level=7 | exit code 1 |
@@ -78,8 +78,8 @@
 
 | TC ID | 要件 | レベル | 入力 | 期待値 |
 |---|---|---|---|---|
-| TC-DMR-030 | FR-04 Spark → chatgpt_pro | L1 | model="gpt-5.3-codex-spark" | "chatgpt_pro" |
-| TC-DMR-031 | FR-04 Opus → claude_max | L1 | model="claude-opus-4-6" | "claude_max" |
+| TC-DMR-030 | FR-04 gpt-6-luna → chatgpt_pro | L1 | model="gpt-6-luna" | "chatgpt_pro" |
+| TC-DMR-031 | FR-04 Opus → claude_max | L1 | model="opus" | "claude_max" |
 | TC-DMR-032 | FR-04 未定義 → unknown | L1 | model="unknown" | "unknown" |
 | TC-DMR-033 | FR-04 セクション不在 → unknown | L1 | capability_tiers未定義 | "unknown" |
 
@@ -110,8 +110,8 @@
 
 | TC ID | 要件 | レベル | 観点 | 期待値 |
 |---|---|---|---|---|
-| TC-DMR-100 | FR-05 switch不要判定 | L1 | bloom=3, model=spark | switch不要と判定 |
-| TC-DMR-101 | FR-05 switch必要判定 | L1 | bloom=4, model=spark | switch必要と判定 |
+| TC-DMR-100 | FR-05 switch不要判定 | L1 | bloom=3, model=gpt-6-luna | switch不要と判定 |
+| TC-DMR-101 | FR-05 switch必要判定 | L1 | bloom=4, model=gpt-6-luna | switch必要と判定 |
 | TC-DMR-102 | FR-05 capability_tiers不在 | L1 | セクションなし | 判定スキップ |
 | TC-DMR-103 | FR-05 bloomフィールドなし | L1 | タスクYAMLにbloom_levelなし | 判定スキップ |
 
@@ -119,10 +119,10 @@
 
 | TC ID | 要件 | レベル | 観点 | 期待値 |
 |---|---|---|---|---|
-| TC-DMR-110 | FR-06 同CLI内switch | L2 | codex spark→codex 5.3 | model_switch inbox送信 |
+| TC-DMR-110 | FR-06 同CLI内switch | L2 | codex gpt-6-luna→codex gpt-6-sol | model_switch inbox送信 |
 | TC-DMR-111 | FR-06 CLI跨ぎ | L2 | bloom=5, codex足軽 | Claude足軽に再割当 |
 | TC-DMR-112 | FR-06 Codex足軽switchスキップ | L2 | Codex足軽にmodel_switch | サイレントスキップ |
-| TC-DMR-113 | FR-06 switch不要時は送信なし | L2 | bloom=3, spark足軽 | inbox送信なし |
+| TC-DMR-113 | FR-06 switch不要時は送信なし | L2 | bloom=3, gpt-6-luna足軽 | inbox送信なし |
 
 ### 4.3 NFR-02: モデル切替レイテンシ
 
@@ -205,8 +205,8 @@
 
 ### 7.2 推奨モデル選定
 
-- UT-DMR-010: L1-L3 → Spark選定
-- UT-DMR-011: L4 → Codex 5.3選定
+- UT-DMR-010: L1-L3 → gpt-6-luna選定
+- UT-DMR-011: L4 → gpt-6-sol選定
 - UT-DMR-012: L5 → Sonnet Thinking選定
 - UT-DMR-013: L6 → Opus Thinking選定
 - UT-DMR-014: chatgpt_proグループ優先

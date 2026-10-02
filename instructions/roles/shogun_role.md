@@ -41,7 +41,7 @@ Do NOT specify: number of ashigaru, assignments, verification methods, personas,
 ### Required cmd fields
 
 ```yaml
-- id: cmd_XXX
+- cmd_id: cmd_XXX
   timestamp: "ISO 8601"
   north_star: "1-2 sentences. Why this cmd matters to the business goal. Derived from context/{project}.md north star."
   purpose: "What this cmd must achieve (verifiable statement)"
@@ -74,6 +74,44 @@ command: |
 # ❌ Bad — vague purpose, no criteria
 command: "Improve karo pipeline"
 ```
+
+### Writing the cmd into the queue (cmd_741 / cmd_741 redo1 / redo2)
+
+`queue/shogun_to_karo.yaml`(cmd正本)への新規cmd追記は、必ず
+`bash scripts/shogun_to_karo_lock.sh append` を使うこと。標準入力に
+cmd_idを持つYAML list要素(1件以上)を渡す — これまでの
+`cat >> queue/shogun_to_karo.yaml <<EOF ... EOF` の操作感のまま使える。
+**ヒアドキュメントは必ず`<<'EOF'`(quoted)を使うこと**——`<<EOF`
+(unquoted)ではシェルがcmd本文中の`$VAR`・`${...}`・バッククォート・
+`$()`を展開してから渡してしまい、内容改変や意図しないコマンド実行に
+つながる(cmd_741 redo2 / G741-R1-HEREDOC-01):
+
+```bash
+bash scripts/shogun_to_karo_lock.sh append <<'EOF'
+- cmd_id: cmd_XXX
+  timestamp: "2026-09-02T18:00:00+09:00"
+  north_star: "..."
+  purpose: "..."
+  acceptance_criteria:
+    - "..."
+  command: |
+    ...
+  project: project-id
+  priority: high
+  status: pending
+EOF
+```
+
+**生Edit/Write/heredocでの`queue/shogun_to_karo.yaml`への直接追記は
+禁止**(`cat >> queue/shogun_to_karo.yaml <<EOF ... EOF` を含む)。理由:
+将軍・家老の双方が生Read/Edit/Writeで並行書込みすると、直前エントリと
+新エントリの境界(`- ` で始まる区切り行)が消失し、新cmdが直前cmdの
+フィールドへサイレント上書きされ、cmd_idで参照不能になる事故が起きる
+(cmd_734/735/736で実際に発生)。本スクリプトは追記後にYAML妥当性・
+cmd_id要素数・cmd_id重複を検証し、異常があれば書込みを取り消す
+(本番ファイルには一切触れない)。家老側も同じlockを使ってstatus更新を
+行う(archive移管の実行自体はcmd_707以降★将軍主管であり家老は行わない。
+詳細は`instructions/generated/karo.md`「Archive on Completion」参照)。
 
 ## Critical Thinking (Lightweight — Steps 2-3)
 
@@ -110,7 +148,7 @@ When a message arrives, you'll be woken with "ntfy受信あり".
 
 1. Read `queue/ntfy_inbox.yaml` — find `status: pending` entries
 2. Process each message:
-   - **Task command** ("〇〇作って", "〇〇調べて") → Write cmd to shogun_to_karo.yaml → Delegate to Karo
+   - **Task command** ("〇〇作って", "〇〇調べて") → Write cmd via `bash scripts/shogun_to_karo_lock.sh append` (see "Writing the cmd into the queue" above — never raw Edit/Write) → Delegate to Karo
    - **Status check** ("状況は", "ダッシュボード") → Read dashboard.md → Reply via ntfy
    - **VF task** ("〇〇する", "〇〇予約") → Register in saytask/tasks.yaml (future)
    - **Simple query** → Reply directly via ntfy
@@ -136,7 +174,7 @@ Lord's input
   │  │         Read/write saytask/tasks.yaml, update streaks, send ntfy
   │  │
   │  └─ NO → Traditional cmd pipeline
-  │           Write queue/shogun_to_karo.yaml → inbox_write to Karo
+  │           Write via `shogun_to_karo_lock.sh append` (never raw Edit/Write) → inbox_write to Karo
   │
   └─ Ambiguous → Ask Lord: "足軽にやらせるか？TODOに入れるか？"
 ```

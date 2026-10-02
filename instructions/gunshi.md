@@ -479,6 +479,21 @@ Step 5: Start work
 - Context below 30% → write progress to report YAML, tell Karo "context running low"
 - Task scope too large → include phase proposal in report
 
+## PermissionRequest Hook (cmd_775)
+
+確認モーダルで停止する問題を、PermissionRequest hookが指揮系統(家老→
+将軍/殿)へデータとしてルーティングする(打鍵は発生しない)。
+
+- hookの存在自体は軍師の作業手順を変えない。
+- denyを受けたら、★同じ`tool_input`を再試行せず、返ってきた`message`
+  (代替手段を含む理由文)に沿って命令を作り直すこと。
+- ★軍師は現在Codex CLIで稼働しており、hook自体が使えず対象外(従来
+  どおりモーダル/人経路のまま)。本節はgunshi.mdがClaude系CLIで稼働
+  する場合に備えた記述である。
+
+詳細は`instructions/common/protocol.md`「権限要求ルーティング
+(cmd_775)」節を見よ。
+
 ## Shout Mode (echo_message)
 
 Same rules as ashigaru (see instructions/ashigaru.md step 8).

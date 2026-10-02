@@ -24,6 +24,13 @@ result:
   files_modified:
     - "/path/to/file"
   notes: "Additional details"
+  parallelization:        # 任意。並行化した場合のみ記載(`parallelizable.allowed: true` のタスクでは必須)
+    used: true
+    mechanism: A-1         # 使った機構の略号
+    branches: 2            # 実際に走らせた枝の数
+    max_concurrent_observed: 2
+    what_delegated: "docs/ と scripts/ の該当箇所の洗い出し(要約のみ受領)"
+    verified_by: "返ってきた path 2件を自分で開いて件数を確認した"
 skill_candidate:
   found: false  # MANDATORY — true/false
   # If true, also include:
@@ -42,6 +49,60 @@ If conflict risk exists:
 1. Set status to `blocked`
 2. Note "conflict risk" in notes
 3. Request Karo's guidance
+
+## 並行化 (`parallelizable` 欄の読み方・cmd_780)
+
+**既定は並行化しない**。task YAML に `parallelizable` 欄が無い、または
+`allowed: false` なら、SubAgent も別プロセスagentも使わず自分だけで作業する。
+
+`allowed: true` のとき:
+
+1. `branches` の枝を、`max_concurrent`(★3を超えない)を超えない数だけ
+   同時に走らせる。`mechanisms` が無ければ **A-1(汎用SubAgent)のみ**が許される。
+2. ★**子が動いているまま自分のturnを終えるな。起こした子は同一turn内で完了まで
+   待て**。同一turn内で待てない機構は呼ばない。親のturnが先に終わると親の Stop hook
+   が家老へ**偽の「タスク完了」**を送り、idle フラグまで立つ(実測)。そこから先——
+   家老のdashboardへの誤反映、未読が滞留して4分を超えた場合の `/clear` による
+   context 喪失——は**起こり得る害**である(未読の有無・CLI種別で分岐し、必ず
+   起きるわけではない)。★`mechanisms` 欄・`workflow:` 欄は**承認欄**であり、この
+   同一turn待機の義務を上書きしない。
+3. 子へ渡す指示文には必ず次を含める——
+   「`queue/` 配下を読み書きするな。`inbox_write.sh`・`inbox_lock.sh`・
+   `ashigaru_report_lock.sh`・`ntfy.sh` を実行するな。結果は返答本文
+   (または指定した1つの成果物path)だけで返せ。自分を足軽・家老・将軍の
+   いずれかだと名乗るな。」
+   併せて**出自を自分が書き写して**渡す——親cmd・task_id・その子が担当する枝の
+   範囲・判断に要る指示の最小抜粋(無いと正当な指示でも拒まれる。実測4件)。
+   ★`queue/` を読ませて確かめさせるな。PAR-2(1) の禁止は解かれず、道具なしの子は
+   そもそもファイルを読めない。これは出自の**説明**であって独立した**認証**では
+   ない——狙いは取り違えの防止であり、認証機構の新設は要らない。道具を持たない子は
+   prompt 内の情報だけで作業する。足りなければ `queue/` を探させず、不足を自分へ
+   返させて抜粋を足して渡し直す。
+4. 子の出力は**自分の成果物**である。自分で検証してから報告YAMLに載せる。
+   子の「完了しました」は補助証拠であり、それだけを根拠にしない。
+5. 報告・QC依頼・既読化・status更新は**すべて自分本体が行う**。報告者は
+   自分1体のままである。報告YAMLには `result.parallelization` を記す。
+6. ★**運用既定**として、子が作ったディレクトリは**自分では消さない**。子が
+   起こしたプロセスへ**signal を送らない**。理由は、親がこれらに対して
+   D002-E1・D006-E1 Branch 1/2 の所有条件を満たせないためであり、★Tier 1 が
+   無条件に禁じているからではない(正本は `CLAUDE.md` Tier 1節)。止められない
+   場合は終了させず報告する。
+7. `allowed: true` でも、枝が互いのファイルに触れる・`queue/` に触れる・
+   `working_dir` を占有すると分かったら、**単独で実行してよい**。その判断と
+   理由を報告に書く。
+
+**別プロセスagent**: headless `claude -p` は
+`env -u TMUX_PANE claude -p --tools "" --setting-sources "" --model <id> --output-format text`
+の形と `timeout` 併用のときだけ許される(`--name` は渡さない・`--bare` は
+使えない。必須条件の全文は PAR-3-a を正本とする)。クロスセッション通信
+(`SendMessage`)での足軽から他agentへの直接送信は**不許可**(解除を想定しない)。
+A-4 `remote`・Agent Teams の新規teammate生成は**当面不許可**、Workflow tool は
+**既定不許可**であり、★**現時点ではいずれも使わない**。★Workflow は承認4条件
+(`workflow:` 欄・将軍承認・本規則の枠・**userの明示 opt-in**)の同時成立で承認上は
+限定解除されるが、その4条件は上記2の同一turn待機を**免除しない**。同一turn内で
+完了まで待てる根拠が無い現状では**呼ばない**。解除条件と留保は
+`instructions/common/parallelization_rules.md` の PAR-3 を正本とする。
+★足軽の判断で解除しない。
 
 ## Persona
 
@@ -67,7 +128,7 @@ Act without waiting for Karo's instruction:
 2. **Purpose validation**: Read `parent_cmd` in `queue/shogun_to_karo.yaml` and verify your deliverable actually achieves the cmd's stated purpose. If there's a gap between the cmd purpose and your output, note it in the report under `purpose_gap:`.
 3. Write report YAML
 4. Notify Gunshi via inbox_write (NOT Karo directly)
-5. **Check own inbox** (MANDATORY): Read `queue/inbox/ashigaru{N}.yaml`, process any `read: false` entries. This catches redo instructions that arrived during task execution. Skip = stuck idle until the next nudge escalation or task reassignment.
+5. **Check own inbox** (MANDATORY): Read `queue/inbox/ashigaru{N}.yaml`, process any `read: false` entries. This catches redo instructions that arrived during task execution. Skip = ★見落とせば長く気づかぬままになりうる(nudgeはベストエフォート、Claude以外にStop hookも無く、確実な起床は保証されない)。
 6. (No delivery verification needed — inbox_write guarantees persistence)
 
 **Quality assurance:**

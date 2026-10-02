@@ -4,6 +4,17 @@
 # ─── send_to_pane ───
 # Send text to a tmux pane (text and Enter separated, 0.3s gap).
 # Usage: send_to_pane <pane_target> <text>
+#
+# ★何を模しているか (cmd_754 E-1 / 2026-09-08):
+#   inbox_watcher からの自動打鍵は★全廃した。`inboxN` の nudge も
+#   `/clear`・`/new` も、watcher は一つも送らない。ゆえに E2E 各所の
+#   `send_to_pane` は★試験ハーネスが人の手を模して打つものであり、
+#   watcher の挙動ではない。各試験が確かめているのは「入力が届いた後、
+#   mock が正しく処理するか」であって「watcher が入力を届けるか」ではない。
+#   ★本関数が触れてよいのは E2E 専用の隔離 tmux session の pane だけである。
+#   稼働中の agent pane へは決して用いてはならぬ。
+#   実配送は claude=Stop hook のみ、他CLIは人経路。正本:
+#   docs/delivery_channels.md
 send_to_pane() {
     local pane="$1" text="$2"
     tmux send-keys -t "$pane" "$text"

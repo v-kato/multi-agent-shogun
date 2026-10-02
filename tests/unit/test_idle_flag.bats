@@ -52,7 +52,8 @@ exit 1
 MOCK
     chmod +x "$MOCK_PGREP"
 
-    export MOCK_CAPTURE_PANE=""
+    export MOCK_CAPTURE_PANE="$(printf '╭─────────╮\n│ Ask anything │\n╰─────────╯\n  ? for shortcuts\n')"  # cmd_754: 確認待ちを含まぬアイドル画面(空文字は『pane状態不明』扱いで打鍵抑止となる)
+    export MOCK_CURSOR_SPEC="1|1|0"
     export MOCK_PANE_CLI=""
 
     cat > "$WATCHER_HARNESS" << HARNESS
@@ -83,6 +84,13 @@ tmux() {
         return 0
     fi
     if echo "\$*" | grep -q "display-message"; then
+        if echo "\$*" | grep -q "cursor_y"; then
+            # ★カーソル位置(cursor_y|cursor_flag|pane_in_mode)。既定値 1 は
+            #   既定 MOCK_CAPTURE_PANE の入力行(`│ Ask anything │`)の行番号
+            #   (cmd_754 redo3: 安全状態は layout とカーソルの連言である)。
+            echo "\${MOCK_CURSOR_SPEC:-1|1|0}"
+            return 0
+        fi
         echo "mock_session"
         return 0
     fi
@@ -236,9 +244,9 @@ YAML
     [ "$status" -eq 0 ]  # 0 = busy (cooldown overrides idle flag)
 }
 
-# ─── T-008: nudge送信後もフラグ保持 (v4.0.1 cc234ed設計) ───
+# ─── T-008: 配送判定を通してもフラグは保持される (v4.0.1 cc234ed設計) ───
 
-@test "T-008: send_wakeup preserves idle flag after sending nudge (v4.0.1)" {
+@test "T-008: send_wakeup は打鍵せず、idle フラグを保持する (cmd_754 E-1)" {
     # Create idle flag (agent was idle)
     touch "$IDLE_FLAG_DIR/shogun_idle_test_idle_agent"
 
@@ -249,12 +257,12 @@ YAML
     "
     [ "$status" -eq 0 ]
 
-    # Nudge was sent (send-keys)
-    grep -q "send-keys.*inbox1" "$MOCK_LOG"
+    # ★cmd_754: nudge そのものが廃止された。打鍵は1つも起きない。
+    ! grep -q "send-keys" "$MOCK_LOG"
 
-    # Flag should be PRESERVED after nudge (v4.0.1 design: cc234ed)
-    # Removing flag here causes: agent_is_busy()=true → no further nudges → deadlock.
-    # Flag is removed by stop_hook when agent actually goes idle (natural lifecycle).
+    # Flag should be PRESERVED (v4.0.1 design: cc234ed)
+    # Removing flag here causes: agent_is_busy()=true → deadlock.
+    # Flag is removed by stop_hook when agent actually goes idle.
     [ -f "$IDLE_FLAG_DIR/shogun_idle_test_idle_agent" ]
 }
 

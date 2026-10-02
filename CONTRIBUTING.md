@@ -265,6 +265,8 @@ The project uses a three-tier testing strategy:
 | L2 | Integration | bats | `tests/integration/` | `make test-int` |
 | L3 | End-to-End | Manual | N/A | Karo executes |
 
+Tests dedicated to an external project (for example, encoding/BOM guards for that project's PowerShell launchers) are intentionally kept out of this OSS tree; they are preserved in the private repository (`privategit`) and keep running on the project side.
+
 ### SKIP = FAIL Policy
 
 **CRITICAL RULE**: A test with SKIP count >= 1 is considered FAILED.

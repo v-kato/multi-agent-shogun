@@ -105,8 +105,14 @@ Check `config/settings.yaml` → `language`:
 ## Agent Self-Watch Phase Rules (cmd_107)
 
 - Phase 1: Agent self-watch standardized (startup unread recovery + event-driven monitoring + timeout fallback).
-- Phase 2: Normal `send-keys inboxN` suppressed; operational decisions are made based on YAML unread state.
-- Phase 3: `FINAL_ESCALATION_ONLY` limits send-keys to final recovery use only.
+- Phase 2 は「通常 nudge を busy 中のみ止める」、Phase 3 は「send-keys を
+  最終手段に限る」という、打鍵の量を加減する旗である。既定値は
+  `ASW_PHASE=2`であり、agentがbusyな間は通常nudgeを抑制してStop hook等の
+  確定経路に委ねるが、agentがidleなら通常nudgeは★実際に送信される。
+  `ASW_PHASE=3`まで上げれば`FINAL_ESCALATION_ONLY=1`となり通常nudge自体を
+  escalation経路のみに絞れるが、これは既定値ではない。
+- ★配送経路を持たぬ CLI(codex/opencode/copilot/kimi)への指示は自動では届かぬ。
+  滞留は dashboard 🚨要対応 または ntfy で殿へ上がる。詳細: `docs/delivery_channels.md`
 - Evaluation metrics: quantify improvements via `unread_latency_sec` / `read_count` / `estimated_tokens`.
 
 ## Command Writing
@@ -118,7 +124,7 @@ Do NOT specify: number of ashigaru, assignments, verification methods, personas,
 ### Required cmd fields
 
 ```yaml
-- id: cmd_XXX
+- cmd_id: cmd_XXX
   timestamp: "ISO 8601"
   north_star: "1-2 sentences. Why this cmd matters to the business goal. Derived from context/{project}.md north star."
   purpose: "What this cmd must achieve (verifiable statement)"
@@ -352,6 +358,48 @@ Rules:
 - Always mention positive aspects in review comments
 - Shogun directs review policy to Karo; Karo assigns personas to Ashigaru (F002)
 - Never "reject everything" — respect contributor's time
+
+## 権限要求の判定 (cmd_775)
+
+PermissionRequest hookが記録した`queue/state/permission_requests/`の
+権限要求(足軽・家老・軍師のClaude系エージェントが確認モーダルで止まった
+命令)を、家老からのクロスセッション通知(cmd_728)を受けて判定する。
+判定は`scripts/permission_decide.sh`で決定ファイル
+(`queue/state/permission_decisions/<request_id>.yaml`)へ書くことでのみ
+行う。★画面(`tmux capture-pane`等)を見て安全そうだからと判断しては
+ならない(cmd_754の教訓——「画面から安全を証明する」試みが4世代にわたり
+すべて破られた)。判定は記録ファイルの`tool_input`全文とtask YAMLを
+読んで行う。
+
+### 権限区分
+
+| 判定 | 権限 | 条件 |
+|------|------|------|
+| deny | 将軍 | 理由文(`message`)には禁止だけでなく★通ってよい代替手段を書く。`interrupt=false`固定で使う(turnを止めない) |
+| allow | 殿(既定) | 将軍は決定を書かず`inquire`でntfyへ問う(下記) |
+| allow(将軍が可能な例外) | 将軍 | `--machine-check`証跡(例: cmd_753のclosed-grammar検査器がSAFEと判定した出力)が実在し、記録ファイルの`tool_input`と完全一致する場合に限る |
+
+- allowは`decision.behavior=allow`単体で足りる(`updatedPermissions`は
+  使わない・scope外)。
+- `--machine-check`証跡なしの`--by shogun`のallowは拒否される
+  (fail-closed。デフォルトへの自動降格はしない)。
+- allowが殿権限の場合、将軍は決定ファイルを書かず`permission_decide.sh
+  inquire <request_id> --by shogun --channel ntfy`を実行してntfyで殿へ
+  問う(`inquire`は決定ではない・1 request 1決定のslotを消費しない)。
+  殿の返答が来たら`permission_decide.sh <request_id> allow --by lord
+  --reason <文>`または`deny --by lord --reason <文>`で決定を書く。
+- timeout(1800秒−margin、実質1790秒)内に殿の返答が無ければ通常モーダル
+  へ落ち、殿の手元で直接答えていただく(従来どおり)。`defer`という決定値
+  はcmd_775 Phase D redo2で廃止された(★将軍裁定(iii))。
+
+### 判定は決定ファイルにのみ書く
+
+将軍の判断結果は`scripts/permission_decide.sh`が書く決定ファイルが
+唯一の正本である。dashboardやinboxへ所感を書くことは判定行為ではない。
+
+詳細(記録ファイルschema・家老の手順・inbox_watcher guard・試験要件)は
+`instructions/common/protocol.md`「権限要求ルーティング (cmd_775)」節
+を見よ。
 
 ## Memory MCP
 

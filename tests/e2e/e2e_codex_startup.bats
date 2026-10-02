@@ -1,16 +1,28 @@
 #!/usr/bin/env bats
 # ═══════════════════════════════════════════════════════════════
-# E2E-008: Codex CLI Startup Prompt after /new
+# E2E-008: Codex CLI — /new も startup prompt も自動では送らぬ
 # ═══════════════════════════════════════════════════════════════
-# Validates that inbox_watcher correctly handles Codex CLI agents:
-#   1. Sends /new (not /clear) for context reset
-#   2. Sends startup prompt AFTER /new to trigger Session Start
-#   3. Agent processes assigned task via startup prompt
-#   4. Nudge is suppressed immediately after startup prompt
+# ★契約の改訂 (cmd_754 E-1 / 2026-09-08):
+#   本ファイルは元来「inbox_watcher が /new を送り、その後 startup prompt を
+#   送って Session Start を起こす」ことを★正常系として検査していた。その
+#   前提は失効した。2026-09-08、確認モーダル表示中の pane へ watcher が
+#   送った Enter が既定選択肢 `❯ 1. Yes` を選び、D002-E1 違反の削除が実際に
+#   実行された。将軍は★自動打鍵の安全集合を空とする裁定を下した (E-1)。
 #
-# Background: Codex CLI's /new does NOT auto-reload AGENTS.md and
-# trigger Session Start like Claude Code's /clear does with CLAUDE.md.
-# inbox_watcher must explicitly send a startup prompt after /new.
+#   現契約における Codex:
+#     - Stop hook ✕ / agent 自前の self-watch ✕ / 自動打鍵 ✕
+#     - ★自動で配送するものは何も無い → 人経路のみ
+#   Codex の /new が AGENTS.md を読み直しても Session Start を起こさぬ、と
+#   いう CLI 側の事実は変わらない。変わったのは★その穴を打鍵で埋めるのを
+#   やめたことである。埋めるのは人であり、watcher は「送れぬ」ことと
+#   「人が何をすればよいか」を記録して滞留を人へ上げる。
+#
+#   本ファイルが確かめるもの:
+#     A/B) task_assigned 到来時、/new も startup prompt も送らず人経路へ倒す
+#     C)   Claude でも /clear は送らぬ。ただし配送は Stop hook が担う
+#     D/E) clear_command は何通来ても送られず、read:false のまま保持される
+#     F)   welcome 画面での初期 idle フラグ生成は今も要る(誤 busy 防止)
+#   正本: docs/delivery_channels.md
 # ═══════════════════════════════════════════════════════════════
 
 # bats file_tags=e2e
@@ -51,12 +63,31 @@ dump_watcher_log() {
     echo "=== End watcher log ===" >&2
 }
 
-# ═══════════════════════════════════════════════════════════════
-# E2E-008-A: Codex agent receives startup prompt after /new
-#            and processes assigned task
-# ═══════════════════════════════════════════════════════════════
+# Helper: wait until a fixed string appears in the watcher log
+wait_for_log() {
+    local log_file="$1" pattern="$2" timeout="${3:-30}"
+    local elapsed=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        if grep -qF "$pattern" "$log_file" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    echo "TIMEOUT: '$pattern' not found in $log_file after ${timeout}s" >&2
+    dump_watcher_log "$log_file"
+    return 1
+}
 
-@test "E2E-008-A: Codex startup prompt triggers task processing via inbox_watcher" {
+# ═══════════════════════════════════════════════════════════════
+# E2E-008-A: Codex 宛の task_assigned は打鍵されず、タスクは動かない
+# ═══════════════════════════════════════════════════════════════
+# ★旧試験は「startup prompt が pane に現れ、タスクが done になる」ことを
+#   期待していた。今は誰も打たぬゆえ、pane には何も現れず assigned のまま
+#   である。これは不具合ではなく、裁定どおりの帰結である。代償(遅延)は
+#   可視であり、誤爆の代償は不可視であった。★見える失敗を選ぶ。
+
+@test "E2E-008-A: Codex へは /new も startup prompt も送られず、タスクは動かぬ" {
     local ashigaru1_pane
     ashigaru1_pane=$(pane_target 1)
 
@@ -79,29 +110,24 @@ dump_watcher_log() {
     watcher_pid=$(start_inbox_watcher "ashigaru1" 1 "codex")
     log_file="/tmp/e2e_inbox_watcher_ashigaru1_$$.log"
 
-    # 5. Wait for task to complete
-    #    Flow: watcher detects unread → sends /new → polls idle (5s) → sends startup prompt → mock processes
-    #    Expected time: ~10-15s
-    run wait_for_yaml_value "$E2E_QUEUE/queue/tasks/ashigaru1.yaml" "task.status" "done" 45
-    if [ "$status" -ne 0 ]; then
-        dump_pane_for_debug "$ashigaru1_pane" "ashigaru1-codex"
-        dump_watcher_log "$log_file"
-    fi
+    # 5. context reset (/new) を送らぬ旨と、人が何をすればよいかが残る
+    run wait_for_log "$log_file" "[NO-AUTO-SEND] ashigaru1: 新タスク前の context reset(/new)は自動では送らぬ"
+    assert_success
+    run wait_for_log "$log_file" "必要なら人手で /new を入力されたし"
     assert_success
 
-    # 6. Verify report was written
-    run wait_for_file "$E2E_QUEUE/queue/reports/ashigaru1_report.yaml" 10
+    # 6. Codex には配送経路が無い。未配送として数える。
+    run wait_for_log "$log_file" "未読1件の起床通知 (cli=codex) は自動では配送せぬ (理由=no_delivery_channel"
     assert_success
 
-    # 7. Verify report content
-    assert_yaml_field "$E2E_QUEUE/queue/reports/ashigaru1_report.yaml" "status" "done"
-    assert_yaml_field "$E2E_QUEUE/queue/reports/ashigaru1_report.yaml" "task_id" "subtask_test_001a"
+    # 7. pane には startup prompt が現れない (打鍵していないのだから当然である)
+    run bash -c "tmux capture-pane -t '$ashigaru1_pane' -p -J -S - 2>/dev/null | grep -qF 'Startup prompt received'"
+    assert_failure
 
-    # 8. Verify startup prompt appeared in pane output (scrollback search)
-    run wait_for_pane_text "$ashigaru1_pane" "Startup prompt received" 10
-    if [ "$status" -ne 0 ]; then
-        dump_watcher_log "$log_file"
-    fi
+    # 8. 誰も打鍵せぬゆえタスクは assigned のまま、未読も保持される
+    run wait_for_yaml_value "$E2E_QUEUE/queue/tasks/ashigaru1.yaml" "task.status" "assigned" 10
+    assert_success
+    run assert_inbox_unread_count "$E2E_QUEUE/queue/inbox/ashigaru1.yaml" 1
     assert_success
 
     # Cleanup
@@ -109,11 +135,10 @@ dump_watcher_log() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# E2E-008-B: Codex watcher log confirms startup prompt sent
-#            and nudge suppressed
+# E2E-008-B: watcher ログに旧契約の打鍵が一つも現れない
 # ═══════════════════════════════════════════════════════════════
 
-@test "E2E-008-B: Codex watcher log shows startup prompt sent and nudge skipped" {
+@test "E2E-008-B: Codex watcher log には startup prompt も /new 送信も現れない" {
     local ashigaru1_pane
     ashigaru1_pane=$(pane_target 1)
 
@@ -135,39 +160,42 @@ dump_watcher_log() {
     watcher_pid=$(start_inbox_watcher "ashigaru1" 1 "codex")
     log_file="/tmp/e2e_inbox_watcher_ashigaru1_$$.log"
 
-    # 4. Wait for processing
-    run wait_for_yaml_value "$E2E_QUEUE/queue/tasks/ashigaru1.yaml" "task.status" "done" 45
-    if [ "$status" -ne 0 ]; then
-        dump_pane_for_debug "$ashigaru1_pane" "ashigaru1-codex-B"
-        dump_watcher_log "$log_file"
-    fi
+    # 4. 未読を1周期以上処理させる
+    run wait_for_log "$log_file" "unread for ashigaru1"
     assert_success
 
-    # 5. Check watcher log for startup prompt delivery
+    # 5. startup prompt は送られない (関数は残るが打鍵を持たぬ)
     run grep "Sending startup prompt to ashigaru1" "$log_file"
-    if [ "$status" -ne 0 ]; then
-        dump_watcher_log "$log_file"
-    fi
-    assert_success
+    assert_failure
 
-    # 6. Check watcher log for nudge suppression after startup prompt
+    # 6. 「startup prompt を送った直後ゆえ nudge を抑止する」という
+    #    旧契約の分岐そのものが無い
     run grep "Startup prompt just sent.*skipping nudge" "$log_file"
-    assert_success
+    assert_failure
 
-    # 7. Check that /new was sent (not /clear)
+    # 7. /new も /clear も送られない
     run grep "CONTEXT-RESET.*Sending /new" "$log_file"
-    assert_success
+    assert_failure
+
+    run grep "CONTEXT-RESET.*Sending /clear" "$log_file"
+    assert_failure
+
+    # 8. 打鍵系ログは一つも無い (安全集合は空である)
+    run grep -qE "\[SEND-KEYS\]" "$log_file"
+    [ "$status" -ne 0 ]
 
     # Cleanup
     stop_inbox_watcher "$watcher_pid"
 }
 
 # ═══════════════════════════════════════════════════════════════
-# E2E-008-C: Claude agent does NOT receive startup prompt
-#            (only Codex gets it)
+# E2E-008-C: Claude でも /clear は送らぬ。配送は Stop hook が担う
 # ═══════════════════════════════════════════════════════════════
+# ★旧試験は「Claude には startup prompt を送らず /clear だけ送る」という
+#   差異を検査していた。今はどちらも送らない。Claude と他CLIの差は
+#   「打鍵の有無」ではなく★「打鍵なしで届く経路(Stop hook)を持つか」である。
 
-@test "E2E-008-C: Claude agent does not receive startup prompt after /clear" {
+@test "E2E-008-C: Claude にも /clear は送られず、Stop hook が配送を担う" {
     local ashigaru1_pane
     ashigaru1_pane=$(pane_target 1)
 
@@ -189,35 +217,37 @@ dump_watcher_log() {
     watcher_pid=$(start_inbox_watcher "ashigaru1" 1 "claude")
     log_file="/tmp/e2e_inbox_watcher_ashigaru1_$$.log"
 
-    # 4. Wait for task to complete (claude uses /clear → auto-recovery via mock handle_clear)
-    run wait_for_yaml_value "$E2E_QUEUE/queue/tasks/ashigaru1.yaml" "task.status" "done" 45
-    if [ "$status" -ne 0 ]; then
-        dump_pane_for_debug "$ashigaru1_pane" "ashigaru1-claude-C"
-        dump_watcher_log "$log_file"
-    fi
+    # 4. 配送は Stop hook に委ねる。打鍵は無い。
+    run wait_for_log "$log_file" "Stop hook が配送を担う"
     assert_success
 
-    # 5. Check that startup prompt was NOT sent (claude doesn't need it)
+    # 5. context reset (/clear) も自動では送らない
+    run wait_for_log "$log_file" "[NO-AUTO-SEND] ashigaru1: 新タスク前の context reset(/clear)は自動では送らぬ"
+    assert_success
+
+    # 6. startup prompt は Claude にも Codex にも送られない
     run grep "Sending startup prompt" "$log_file"
     assert_failure
 
-    # 6. Check that /clear was sent (not /new)
+    # 7. /clear 送信の旧ログは無い
     run grep "CONTEXT-RESET.*Sending /clear" "$log_file"
-    assert_success
+    assert_failure
+
+    run grep -qE "\[SEND-KEYS\]" "$log_file"
+    [ "$status" -ne 0 ]
 
     # Cleanup
     stop_inbox_watcher "$watcher_pid"
 }
 
 # ═══════════════════════════════════════════════════════════════
-# E2E-008-D: Codex clear_command sends /new exactly once
-#            (dedup guard prevents multiple /new sends)
+# E2E-008-D: Codex 宛 clear_command は0回送信・未読のまま保持される
 # ═══════════════════════════════════════════════════════════════
-# Regression test for the /new multi-send bug where clear_command
-# followed by auto-recovery task_assigned caused 2+ /new sends,
-# wiping the startup prompt each time.
+# ★旧試験は「/new をちょうど1回だけ送る」ことを検査していた(多重送信バグの
+#   回帰試験)。今の正解は★0回である。多重送信を防ぐ dedup ではなく、
+#   送信そのものが無い。届かなかった命令を既読にしないことが要である。
 
-@test "E2E-008-D: Codex clear_command sends /new exactly once, not multiple times" {
+@test "E2E-008-D: Codex 宛 clear_command は一度も送られず、未読のまま残る" {
     local ashigaru1_pane
     ashigaru1_pane=$(pane_target 1)
 
@@ -231,7 +261,7 @@ dump_watcher_log() {
     cp "$PROJECT_ROOT/tests/e2e/fixtures/task_ashigaru1_basic.yaml" \
        "$E2E_QUEUE/queue/tasks/ashigaru1.yaml"
 
-    # 3. Send clear_command via inbox_write (simulates karo sending /clear)
+    # 3. Send clear_command via inbox_write (karo が /clear を送る場面)
     bash "$E2E_QUEUE/scripts/inbox_write.sh" "ashigaru1" \
         "/clear" "clear_command" "karo"
 
@@ -240,51 +270,46 @@ dump_watcher_log() {
     watcher_pid=$(start_inbox_watcher "ashigaru1" 1 "codex")
     log_file="/tmp/e2e_inbox_watcher_ashigaru1_$$.log"
 
-    # 5. Wait for task to complete
-    run wait_for_yaml_value "$E2E_QUEUE/queue/tasks/ashigaru1.yaml" "task.status" "done" 60
-    if [ "$status" -ne 0 ]; then
-        dump_pane_for_debug "$ashigaru1_pane" "ashigaru1-codex-D"
-        dump_watcher_log "$log_file"
-    fi
+    # 5. 自動送信せぬ旨と、Codex 向けの人の手順(/clear ではなく /new)が残る
+    run wait_for_log "$log_file" "[NO-AUTO-SEND] ashigaru1: CLIコマンド(/clear)は自動では送らぬ (cli=codex)"
+    assert_success
+    run wait_for_log "$log_file" "人手で ashigaru1 の pane へ /new を入力されたし"
     assert_success
 
-    # 6. Count /new sends in watcher log — must be exactly 1
+    # 6. 未送信のまま未読で保持される
+    run wait_for_log "$log_file" "[NO-AUTO-SEND-DEFER] ashigaru1: clear_command を未送信のまま未読で保持する"
+    assert_success
+    run assert_inbox_unread_count "$E2E_QUEUE/queue/inbox/ashigaru1.yaml" 1
+    assert_success
+
+    # 7. /new 送信は★0回である (旧試験の「ちょうど1回」ではない)
     local new_count
-    new_count=$(grep -c "Codex /clear→/new" "$log_file" 2>/dev/null || true)
-    if [ "$new_count" -ne 1 ]; then
-        echo "Expected 1 /new send, got $new_count" >&2
+    new_count=$(grep -c -E "Sending /new|Codex /clear→/new" "$log_file" 2>/dev/null || true)
+    if [ "$new_count" -ne 0 ]; then
+        echo "Expected 0 /new sends, got $new_count" >&2
         dump_watcher_log "$log_file"
     fi
-    [ "$new_count" -eq 1 ]
+    [ "$new_count" -eq 0 ]
 
-    # 7. Verify startup prompt was sent exactly once
+    # 8. startup prompt も0回
     local startup_count
     startup_count=$(grep -c "Sending startup prompt to ashigaru1" "$log_file" 2>/dev/null || true)
-    if [ "$startup_count" -ne 1 ]; then
-        echo "Expected 1 startup prompt, got $startup_count" >&2
-        dump_watcher_log "$log_file"
-    fi
-    [ "$startup_count" -eq 1 ]
+    [ "$startup_count" -eq 0 ]
 
-    # 8. Verify no duplicate context-reset /new was sent
-    local context_reset_new_count
-    context_reset_new_count=$(grep -c "CONTEXT-RESET.*Sending /new" "$log_file" 2>/dev/null || true)
-    if [ "$context_reset_new_count" -ne 0 ]; then
-        echo "Expected 0 context-reset /new sends (clear_command path should skip), got $context_reset_new_count" >&2
-        dump_watcher_log "$log_file"
-    fi
-    [ "$context_reset_new_count" -eq 0 ]
+    # 9. 送信していない以上、送信後の取りこぼし対策(auto-recovery の
+    #    task_assigned 自動投入)も起きない
+    run grep "\[AUTO-RECOVERY\] queued task_assigned" "$log_file"
+    assert_failure
 
     # Cleanup
     stop_inbox_watcher "$watcher_pid"
 }
 
 # ═══════════════════════════════════════════════════════════════
-# E2E-008-E: Multiple clear_commands to Codex agent still
-#            result in only one /new send
+# E2E-008-E: clear_command が何通来ても送信は0回。滞留は人へ上がる
 # ═══════════════════════════════════════════════════════════════
 
-@test "E2E-008-E: Multiple rapid clear_commands to Codex result in single /new" {
+@test "E2E-008-E: clear_command 3通でも送信は0回、3通とも未読のまま人経路へ" {
     local ashigaru1_pane
     ashigaru1_pane=$(pane_target 1)
 
@@ -298,7 +323,7 @@ dump_watcher_log() {
     cp "$PROJECT_ROOT/tests/e2e/fixtures/task_ashigaru1_basic.yaml" \
        "$E2E_QUEUE/queue/tasks/ashigaru1.yaml"
 
-    # 3. Send THREE clear_commands in rapid succession (simulates karo bug)
+    # 3. Send THREE clear_commands in rapid succession
     bash "$E2E_QUEUE/scripts/inbox_write.sh" "ashigaru1" \
         "/clear" "clear_command" "karo"
     bash "$E2E_QUEUE/scripts/inbox_write.sh" "ashigaru1" \
@@ -311,46 +336,39 @@ dump_watcher_log() {
     watcher_pid=$(start_inbox_watcher "ashigaru1" 1 "codex")
     log_file="/tmp/e2e_inbox_watcher_ashigaru1_$$.log"
 
-    # 5. Wait for task to complete
-    run wait_for_yaml_value "$E2E_QUEUE/queue/tasks/ashigaru1.yaml" "task.status" "done" 60
-    if [ "$status" -ne 0 ]; then
-        dump_pane_for_debug "$ashigaru1_pane" "ashigaru1-codex-E"
-        dump_watcher_log "$log_file"
-    fi
+    # 5. 特殊命令だけが未読として残る周期でも、カウンタは戻さない
+    run wait_for_log "$log_file" "未読3件は特殊命令のみ (人手の入力が要る)。カウンタは戻さぬ"
     assert_success
 
-    # 6. Count /new sends — must be exactly 1 despite 3 clear_commands
-    local new_count
-    new_count=$(grep -c "Codex /clear→/new" "$log_file" 2>/dev/null || true)
-    if [ "$new_count" -ne 1 ]; then
-        echo "Expected 1 /new send despite 3 clear_commands, got $new_count" >&2
-        dump_watcher_log "$log_file"
-    fi
-    [ "$new_count" -eq 1 ]
+    # 6. 3通とも read: false のまま (1通も消えていない)
+    run assert_inbox_unread_count "$E2E_QUEUE/queue/inbox/ashigaru1.yaml" 3
+    assert_success
 
-    # 7. Verify extra clear_commands were suppressed (dedup or busy deferral)
-    local skip_count
-    skip_count=$(grep -c -E "SKIP.*(Codex /new already sent|is busy.*deferred)" "$log_file" 2>/dev/null || true)
-    if [ "$skip_count" -lt 1 ]; then
-        echo "Expected at least 1 dedup/deferral skip log, got $skip_count" >&2
+    # 7. 送信は0回 — dedup で1回に絞るのではなく、そもそも送らない
+    local new_count
+    new_count=$(grep -c -E "Sending /new|Codex /clear→/new" "$log_file" 2>/dev/null || true)
+    if [ "$new_count" -ne 0 ]; then
+        echo "Expected 0 /new sends despite 3 clear_commands, got $new_count" >&2
         dump_watcher_log "$log_file"
     fi
-    [ "$skip_count" -ge 1 ]
+    [ "$new_count" -eq 0 ]
+
+    # 8. 滞留は閾値を超えて人経路へ上がる (黙って沈まないこと)
+    run wait_for_log "$log_file" "[DELIVERY-ALERT]" 45
+    assert_success
 
     # Cleanup
     stop_inbox_watcher "$watcher_pid"
 }
 
 # ═══════════════════════════════════════════════════════════════
-# E2E-008-F: Claude agent at welcome screen (no idle flag)
-#            receives nudge via inbox_watcher initial flag creation
+# E2E-008-F: welcome 画面(idle フラグ無し)でも誤 busy に陥らない
 # ═══════════════════════════════════════════════════════════════
-# Regression test for false-busy deadlock: when Claude CLI is at its
-# welcome screen, no stop_hook has ever fired, so no idle flag exists.
-# inbox_watcher must create the initial idle flag at startup so that
-# nudge delivery isn't blocked by false-busy detection.
+# Claude CLI が welcome 画面にいる間は stop_hook が一度も発火しておらず、
+# idle フラグが存在しない。フラグ不在を busy と誤認すると、Stop hook 待ちの
+# 判断も滞留時計も狂う。★打鍵を廃した後もこの初期フラグ生成は要る。
 
-@test "E2E-008-F: Claude at welcome screen with no idle flag — nudge delivered via initial flag" {
+@test "E2E-008-F: Claude welcome 画面で初期 idle フラグが生成され、誤 busy にならぬ" {
     local ashigaru1_pane
     ashigaru1_pane=$(pane_target 1)
 
@@ -380,8 +398,7 @@ dump_watcher_log() {
     bash "$E2E_QUEUE/scripts/inbox_write.sh" "ashigaru1" \
         "タスクYAMLを読んで作業開始せよ。" "task_assigned" "karo"
 
-    # 5. Start inbox_watcher — this is where the fix kicks in:
-    #    inbox_watcher should create the initial idle flag for Claude CLI
+    # 5. Start inbox_watcher — 初期 idle フラグ生成がここで効く
     local watcher_pid log_file
     log_file="/tmp/e2e_inbox_watcher_ashigaru1_$$.log"
     IDLE_FLAG_DIR="$flag_dir" \
@@ -393,27 +410,24 @@ dump_watcher_log() {
         > "$log_file" 2>&1 &
     watcher_pid=$!
 
-    # 6. Wait for task to complete (proves initial flag + nudge chain worked)
-    #    The initial idle flag is created, then consumed by context-reset→nudge,
-    #    so we verify via log + task completion rather than flag file existence.
-    run wait_for_yaml_value "$E2E_QUEUE/queue/tasks/ashigaru1.yaml" "task.status" "done" 45
-    if [ "$status" -ne 0 ]; then
-        dump_pane_for_debug "$ashigaru1_pane" "ashigaru1-claude-F"
-        dump_watcher_log "$log_file"
-    fi
+    # 6. 初期フラグ生成がログに残る (この修正が効いている証拠)
+    run wait_for_log "$log_file" "Created initial idle flag for ashigaru1"
+    assert_success
+    run wait_for_file "$flag_dir/shogun_idle_ashigaru1" 10
     assert_success
 
-    # 7. Verify initial flag creation was logged (proves the fix is active)
-    run grep "Created initial idle flag for ashigaru1" "$log_file"
-    if [ "$status" -ne 0 ]; then
-        dump_watcher_log "$log_file"
-    fi
+    # 7. 誤 busy に陥らず、配送判断が Stop hook まで進む
+    run wait_for_log "$log_file" "Stop hook が配送を担う"
     assert_success
 
-    # 8. Verify NO "agent is busy" log for this agent
-    #    (without the fix, this would show repeated "busy" messages)
+    # 8. 「busy ゆえ待つ」ログが出ていないこと
+    #    (修正が無ければ busy 判定が繰り返し記録される)
     run grep "unread for ashigaru1 but agent is busy (claude)" "$log_file"
     assert_failure
+
+    # 9. 判断が進んでも打鍵は発生しない
+    run grep -qE "\[SEND-KEYS\]" "$log_file"
+    [ "$status" -ne 0 ]
 
     # Cleanup
     stop_inbox_watcher "$watcher_pid"

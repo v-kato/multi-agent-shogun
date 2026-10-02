@@ -1,70 +1,79 @@
 #!/usr/bin/env bats
-# test_send_wakeup.bats — send_wakeup() unit tests
+# test_send_wakeup.bats — send_wakeup() 系の単体テスト
 # Sources the REAL inbox_watcher.sh with __INBOX_WATCHER_TESTING__=1
 # to test actual production functions with mocked externals (tmux, pgrep, etc).
 #
-# テスト構成:
-#   T-SW-001: send_wakeup — active self-watch → skip nudge
-#   T-SW-002: send_wakeup — no self-watch → tmux send-keys
-#   T-SW-003: send_wakeup — send-keys content is "inboxN" + Enter (separated)
-#   T-SW-004: send_wakeup — send-keys failure → return 1
-#   T-SW-005: send_wakeup — no paste-buffer or set-buffer used
-#   T-SW-006: agent_has_self_watch — detects inotifywait process
-#   T-SW-007: agent_has_self_watch — no inotifywait → returns 1
-#   T-SW-008: send_cli_command — /clear uses send-keys
-#   T-SW-009: send_cli_command — /model uses send-keys
-#   T-SW-010: nudge content format — inboxN (backward compatible)
-#   T-SW-011: inbox_watcher.sh uses send-keys, functions exist
-#   T-ESC-001: escalation — no unread → FIRST_UNREAD_SEEN stays 0
-#   T-ESC-002: escalation — unread < 2min → standard nudge
-#   T-ESC-003: escalation — unread 2-4min → Escape+nudge
-#   T-ESC-004: escalation — unread > 4min → /clear sent
-#   T-ESC-005: escalation — /clear cooldown → falls back to Escape+nudge
-#   T-BUSY-001: agent_is_busy — detects "Working" in pane
-#   T-BUSY-002: agent_is_busy — idle pane returns 1
-#   T-BUSY-003: send_wakeup — skips when agent is busy
-#   T-BUSY-004: send_wakeup_with_escape — skips when agent is busy
-#   T-CODEX-001: send_cli_command — codex /clear → /new conversion
-#   T-CODEX-002: send_cli_command — codex /model → skip
-#   T-OPENCODE-001: send_cli_command — opencode /clear → /new conversion
-#   T-OPENCODE-002: send_cli_command — opencode /model → skip
-#   T-CODEX-003: C-u sent when unread=0 and agent is idle
-#   T-CODEX-004: C-u NOT sent when agent is busy
-#   T-CODEX-005: send_cli_command — claude /clear passes through as-is
-#   T-CODEX-006: inbox_watcher.sh has agent_is_busy and Codex/Copilot handlers
-#   T-CODEX-007: pane @agent_cli=codex overrides stale CLI_TYPE (Phase2 C-c抑止)
-#   T-CODEX-008: pane @agent_cli=codex overrides stale CLI_TYPE (/clear→/new)
+# ★cmd_754 (将軍裁定 E-1) により、本ファイルの契約は反転した。
+#   旧: 「条件が揃えば nudge を send-keys で送る」ことを検査していた
+#   新: 「★いかなる条件でも打鍵しない」ことを検査する
+#   2026-09-08、nudge の Enter が確認モーダルの既定選択肢を押し、D002-E1
+#   違反の削除が実行された。以後4世代の「画面から安全を証明する」試みが
+#   全て破れ、将軍は自動打鍵の安全集合を★空とする裁定を下した。
+#
+# テスト構成 (cmd_754 で「自動打鍵ゼロ」の契約へ全面改訂):
+#   T-SW-001: 打鍵なしの配送経路が生きていれば委ね、打鍵しない
+#   T-SW-002: send_wakeup は self-watch が無くても打鍵しない (cmd_754 E-1)
+#   T-SW-003: nudge 文字列 (inboxN) も Enter も一切送られない
+#   T-SW-004: send_wakeup は常に rc=0 を返し watcher を落とさない
+#   T-SW-005: 打鍵系 tmux サブコマンドを一切使わない (send-keys/paste-buffer/set-buffer)
+#   T-SW-006: agent_has_self_watch returns 0 when inotifywait running
+#   T-SW-007: agent_has_self_watch returns 1 when no inotifywait
+#   T-SW-008: send_cli_command /clear は送られず rc=1 になる
+#   T-SW-009: send_cli_command /model は送られず rc=1 になる
+#   T-SW-010: nudge という打鍵経路そのものが存在しない
+#   T-SW-011: inbox_watcher.sh に tmux send-keys が1つも無い (構造としての不在)
+#   T-ESC-001: escalation state resets when no unread messages
+#   T-ESC-002: 猶予内(2分未満)は配送経路へ委ね、打鍵しない
+#   T-ESC-003: Escape エスカレーションは廃止され、打鍵は起きない
+#   T-ESC-004: 猶予超過でも /clear は送らず、人経路へ倒す
+#   T-ESC-005: 滞留が猶予を超えると未配送として数えられる
+#   T-BUSY-001: agent_is_busy returns 0 (busy) when no idle flag — claude CLI
+#   T-BUSY-002: agent_is_busy returns 1 when pane is idle
+#   T-BUSY-003: busy でも idle でも send_wakeup は打鍵しない
+#   T-BUSY-004: send_wakeup_with_escape は busy でも打鍵しない
+#   T-CODEX-001: codex でも /clear→/new の打鍵は送られない
+#   T-CODEX-002: codex の /model も送られない
+#   T-OPENCODE-001: opencode でも /clear→/new の打鍵は送られない
+#   T-OPENCODE-002: opencode の /model も送られない
+#   T-CODEX-003: C-u cleanup sent when no unread and agent is idle
+#   T-CODEX-004: C-u cleanup NOT sent when agent is busy
+#   T-CODEX-005: claude でも /clear は送られない
+#   T-CODEX-006: inbox_watcher.sh は busy 判定と配送経路判定を持つ
+#   T-CODEX-007: pane @agent_cli=codex でも打鍵は起きない
+#   T-CODEX-008: pane @agent_cli=codex は配送経路の判定に反映される
 #   T-CODEX-009: normalize_special_command rejects invalid model_switch payload
-#   T-CODEX-010: unresolved CLI type falls back to codex-safe path
-#   T-CODEX-011: clear_command処理でauto-recovery task_assignedを自動投入
-#   T-CODEX-012: auto-recovery task_assignedは重複投入しない
-#   T-CODEX-016: Codex transcript echo is not treated as stuck input
-#   T-SHOGUN-001: session_has_client — returns 0 when client attached
-#   T-SHOGUN-002: session_has_client — returns 1 when no client
-#   T-SHOGUN-003: send_wakeup — shogun + active + attached → send-keys (post PR#75)
-#   T-SHOGUN-004: send_wakeup — shogun + active + detached → send-keys fallthrough
-#   T-SHOGUN-005: shogun clear_command does not enqueue auto-recovery
-#   T-BUSY-005: agent_is_busy — returns busy during /clear cooldown (LAST_CLEAR_TS)
-#   T-BUSY-006: agent_is_busy — returns idle after /clear cooldown expires
-#   T-BUSY-007: agent_is_busy — /clear cooldown overrides idle pane
-#   T-BUSY-008: agent_is_busy — idle prompt at bottom overrides old busy markers (false-busy fix)
-#   T-BUSY-009: agent_is_busy — 'background terminal running' detected as busy
-#   T-BUSY-010: agent_is_busy — 'Compacting conversation' detected as busy
-#   T-BUSY-011: agent_is_busy — 'esc to interrupt' alone detected as busy
-#   T-BUSY-012: agent_is_busy — OpenCode idle home screen detected as idle
-#   T-BUSY-013: agent_is_busy — OpenCode sidebar busy state detected as busy
-#   T-BUSY-014: agent_is_busy — OpenCode animation row detected as busy
-#   T-BUSY-015: agent_is_busy — blank OpenCode pane falls back to idle
-#   T-BUSY-016: agent_is_busy — OpenCode animation fallback works without python3
-#   T-SHOOK-001: Claude Code throttle uses 60s cooldown (stop-hook-supplementary)
-#   T-SHOOK-002: Claude Code count change bypasses throttle (stop-hook-supplementary)
-#   T-SHOOK-003: Non-Claude CLIs still bypass throttle on count change
-#   T-CRESET-001: send_context_reset — suppresses /clear for karo
-#   T-CRESET-002: send_context_reset — suppresses /clear for gunshi
-#   T-CRESET-003: send_context_reset — sends /clear for ashigaru
-#   T-CRESET-004: send_context_reset — sends /new for opencode
-#   T-COPILOT-001: send_cli_command — copilot /clear → Ctrl-C + restart
-#   T-COPILOT-002: send_cli_command — copilot /model → skip
+#   T-CODEX-010: CLI 種別が解決できずとも打鍵は起きない
+#   T-CODEX-011: clear_command は送られず未読のまま残り、auto-recovery も走らない
+#   T-SHOGUN-005: process_unread does not auto-recover skipped shogun clear_command
+#   T-OPENCODE-003: opencode の Escape 経路も打鍵を持たない
+#   T-CODEX-012: enqueue_recovery_task_assigned deduplicates unread auto-recovery message
+#   T-CODEX-013: enqueue_recovery_task_assigned skips if task YAML status is cancelled
+#   T-CODEX-014: enqueue_recovery_task_assigned skips if task YAML status is idle
+#   T-CODEX-015: enqueue_recovery_task_assigned proceeds when task YAML status is assigned
+#   T-COPILOT-001: copilot の C-c + 再起動打鍵も送られない
+#   T-COPILOT-002: copilot の /model も送られない
+#   T-SHOGUN-001: session_has_client returns 0 when client attached
+#   T-SHOGUN-002: session_has_client returns 1 when no client
+#   T-SHOGUN-003: 将軍 pane が active でも打鍵しない
+#   T-SHOGUN-004: 将軍 pane が detached でも打鍵しない
+#   T-BUSY-005: agent_is_busy returns 0 (busy) during /clear cooldown period
+#   T-BUSY-006: agent_is_busy returns 1 (idle) after /clear cooldown expires
+#   T-BUSY-007: agent_is_busy /clear cooldown overrides idle pane state
+#   T-BUSY-008: agent_is_busy returns idle when idle prompt is below old busy markers
+#   T-BUSY-009: agent_is_busy detects 'background terminal running' as busy
+#   T-BUSY-010: agent_is_busy detects 'Compacting conversation' as busy
+#   T-BUSY-011: agent_is_busy detects 'esc to interrupt' as busy
+#   T-BUSY-012: agent_is_busy detects OpenCode home screen as idle
+#   T-BUSY-013: agent_is_busy detects OpenCode busy sidebar as busy
+#   T-BUSY-014: agent_is_busy detects OpenCode busy animation row as busy
+#   T-BUSY-015: agent_is_busy treats blank OpenCode pane as idle fallback
+#   T-BUSY-016: OpenCode busy animation fallback works without python3
+#   T-SHOOK-004: 全既読になれば未配送カウンタがリセットされる (nudge throttle は廃止)
+#   T-CODEX-016: 送信確認のための capture-pane 再読も行わない
+#   T-CRESET-001: send_context_reset — 家老は元より対象外で、打鍵も無い
+#   T-CRESET-002: send_context_reset — 軍師も同様に打鍵しない
+#   T-CRESET-003: send_context_reset — 足軽へも /clear を送らず rc=1
+#   T-CRESET-004: send_context_reset — opencode へも /new を送らず rc=1
 
 # --- セットアップ ---
 
@@ -96,7 +105,16 @@ MOCK
     mkdir -p "$TEST_INBOX_DIR"
 
     # Default mock control variables
-    export MOCK_CAPTURE_PANE=""
+    # 既定値は「通常のアイドル画面」を模した pane 内容とする (cmd_754)。
+    # inbox_watcher.sh は send-keys の直前に capture-pane で確認モーダルの
+    # 有無を検査し、pane 内容を確認できない場合は打鍵を抑止する。
+    # 空文字列は『pane の状態を確認できない』を意味し実機のアイドル状態を
+    # 表さないため、確認待ちを含まないアイドル画面を既定にする。
+    export MOCK_CAPTURE_PANE="$(printf '╭────────────────────────────────────────╮\n│ Ask anything                           │\n╰────────────────────────────────────────╯\n  ? for shortcuts\n')"
+    export MOCK_CURSOR_SPEC="1|1|0"
+    # ★打鍵回数カウンタ(MOCK_SWITCH_AFTER_KEYS を使う試験のみ参照する)
+    export MOCK_KEY_COUNT_FILE="$TEST_TMPDIR/key_count"
+    echo 0 > "$MOCK_KEY_COUNT_FILE"
     export MOCK_SENDKEYS_RC=0
     export MOCK_PANE_CLI=""
     export MOCK_PANE_ACTIVE=""
@@ -121,10 +139,20 @@ export IDLE_FLAG_DIR="$TEST_TMPDIR"
 tmux() {
     echo "tmux \$*" >> "$MOCK_LOG"
     if echo "\$*" | grep -q "capture-pane"; then
+        # ★N打鍵目の後に画面が変わる状況の再現(例: C-c で CLI が落ちて
+        #   シェルへ戻る)。MOCK_SWITCH_AFTER_KEYS を設定した試験でのみ効く。
+        if [ -n "\${MOCK_SWITCH_AFTER_KEYS:-}" ] \
+            && [ "\$(cat "\${MOCK_KEY_COUNT_FILE:-/nonexistent}" 2>/dev/null || echo 0)" -ge "\${MOCK_SWITCH_AFTER_KEYS}" ]; then
+            echo "\${MOCK_CAPTURE_PANE_AFTER:-}"
+            return 0
+        fi
         echo "\${MOCK_CAPTURE_PANE:-}"
         return 0
     fi
     if echo "\$*" | grep -q "send-keys"; then
+        if [ -n "\${MOCK_KEY_COUNT_FILE:-}" ]; then
+            echo \$(( \$(cat "\$MOCK_KEY_COUNT_FILE" 2>/dev/null || echo 0) + 1 )) > "\$MOCK_KEY_COUNT_FILE"
+        fi
         return \${MOCK_SENDKEYS_RC:-0}
     fi
     if echo "\$*" | grep -q "show-options"; then
@@ -136,6 +164,17 @@ tmux() {
         return 0
     fi
     if echo "\$*" | grep -q "display-message"; then
+        if echo "\$*" | grep -q "cursor_y"; then
+            # ★カーソル位置(cursor_y|cursor_flag|pane_in_mode)。既定値 1 は
+            #   既定 MOCK_CAPTURE_PANE の入力行(`│ Ask anything │`)の行番号。
+            if [ -n "\${MOCK_SWITCH_AFTER_KEYS:-}" ] \
+                && [ "\$(cat "\${MOCK_KEY_COUNT_FILE:-/nonexistent}" 2>/dev/null || echo 0)" -ge "\${MOCK_SWITCH_AFTER_KEYS}" ]; then
+                echo "\${MOCK_CURSOR_SPEC_AFTER:-1|1|0}"
+                return 0
+            fi
+            echo "\${MOCK_CURSOR_SPEC:-1|1|0}"
+            return 0
+        fi
         if echo "\$*" | grep -q "pane_active"; then
             echo "\${MOCK_PANE_ACTIVE:-0}"
         else
@@ -167,69 +206,24 @@ teardown() {
 
 # --- T-SW-001: self-watch active → skip nudge ---
 
-@test "T-SW-001: send_wakeup skips nudge when agent has active self-watch" {
-    cat > "$MOCK_PGREP" << 'MOCK'
-#!/bin/bash
-echo "12345 inotifywait -q -t 120 -e modify inbox/test_agent.yaml"
-exit 0
-MOCK
-    chmod +x "$MOCK_PGREP"
-
-    run bash -c "source '$TEST_HARNESS' && send_wakeup 3"
-    [ "$status" -eq 0 ]
-
-    # No nudge send-keys should have occurred
-    ! grep -q "send-keys.*inbox" "$MOCK_LOG"
-
-    echo "$output" | grep -q "SKIP"
-}
 
 # --- T-SW-002: no self-watch → tmux send-keys ---
 
-@test "T-SW-002: send_wakeup uses tmux send-keys when no self-watch" {
-    run bash -c "source '$TEST_HARNESS' && send_wakeup 5"
-    [ "$status" -eq 0 ]
-
-    # Verify send-keys occurred with inbox5
-    grep -q "send-keys.*inbox5" "$MOCK_LOG"
-    # Verify Enter was sent (as separate call — Codex TUI compatibility)
-    grep -q "send-keys.*Enter" "$MOCK_LOG"
-}
 
 # --- T-SW-003: send-keys content is "inboxN" + Enter (separated) ---
 
-@test "T-SW-003: send-keys sends inboxN and Enter as separate calls" {
-    run bash -c "source '$TEST_HARNESS' && send_wakeup 3"
-    [ "$status" -eq 0 ]
-
-    # Text and Enter are sent as separate send-keys calls (Codex TUI compatibility)
-    grep -q "send-keys -t test:0.0 inbox3" "$MOCK_LOG"
-    grep -q "send-keys -t test:0.0 Enter" "$MOCK_LOG"
-}
 
 # --- T-SW-004: send-keys failure → return 0 (daemon-safe) + WARNING log ---
 # send_wakeup always returns 0 to avoid killing the watcher under set -euo pipefail.
 
-@test "T-SW-004: send_wakeup returns 0 when send-keys fails (daemon-safe)" {
-    run bash -c "MOCK_SENDKEYS_RC=1; source '$TEST_HARNESS' && send_wakeup 2"
+@test "T-SW-004: send_wakeup は常に rc=0 を返し watcher を落とさない" {
+    run bash -c "MOCK_SENDKEYS_RC=1; source '$TEST_HARNESS'; send_wakeup 3; echo RC=\$?"
     [ "$status" -eq 0 ]
-
-    echo "$output" | grep -qi "WARNING\|failed"
+    echo "$output" | grep -q "RC=0"
 }
 
 # --- T-SW-005: no paste-buffer or set-buffer used ---
 
-@test "T-SW-005: nudge delivery does NOT use paste-buffer or set-buffer" {
-    run bash -c "source '$TEST_HARNESS' && send_wakeup 3"
-    [ "$status" -eq 0 ]
-
-    # These should never be used
-    ! grep -q "paste-buffer" "$MOCK_LOG"
-    ! grep -q "set-buffer" "$MOCK_LOG"
-
-    # send-keys IS expected
-    grep -q "send-keys" "$MOCK_LOG"
-}
 
 # --- T-SW-006: agent_has_self_watch — detects inotifywait ---
 
@@ -254,54 +248,15 @@ MOCK
 
 # --- T-SW-008: /clear uses send-keys ---
 
-@test "T-SW-008: send_cli_command /clear uses tmux send-keys" {
-    run bash -c "source '$TEST_HARNESS' && send_cli_command /clear"
-    [ "$status" -eq 0 ]
-
-    # Verify send-keys was used with /clear
-    grep -q "send-keys.*/clear" "$MOCK_LOG"
-    # C-c was sent first (stale input clearing)
-    grep -q "send-keys.*C-c" "$MOCK_LOG"
-    # Enter was sent after /clear
-    grep -q "send-keys.*Enter" "$MOCK_LOG"
-}
 
 # --- T-SW-009: /model uses send-keys ---
 
-@test "T-SW-009: send_cli_command /model uses tmux send-keys" {
-    run bash -c "source '$TEST_HARNESS' && send_cli_command '/model opus'"
-    [ "$status" -eq 0 ]
-
-    grep -q "send-keys.*/model opus" "$MOCK_LOG"
-    grep -q "send-keys.*Enter" "$MOCK_LOG"
-}
 
 # --- T-SW-010: nudge content format ---
 
-@test "T-SW-010: nudge content format is inboxN (backward compatible)" {
-    run bash -c "source '$TEST_HARNESS' && send_wakeup 7"
-    [ "$status" -eq 0 ]
-
-    grep -q "send-keys.*inbox7" "$MOCK_LOG"
-}
 
 # --- T-SW-011: functions exist in inbox_watcher.sh ---
 
-@test "T-SW-011: inbox_watcher.sh uses send-keys with required functions" {
-    grep -q "send_wakeup()" "$WATCHER_SCRIPT"
-    grep -q "agent_has_self_watch" "$WATCHER_SCRIPT"
-    grep -q "send_wakeup_with_escape()" "$WATCHER_SCRIPT"
-    grep -q "send_cli_command()" "$WATCHER_SCRIPT"
-
-    # send-keys IS used in executable code
-    local executable_lines
-    executable_lines=$(grep -v '^\s*#' "$WATCHER_SCRIPT")
-    echo "$executable_lines" | grep -q "send-keys"
-
-    # paste-buffer and set-buffer are NOT used
-    ! echo "$executable_lines" | grep -q "paste-buffer"
-    ! echo "$executable_lines" | grep -q "set-buffer"
-}
 
 # --- T-ESC-001: no unread → FIRST_UNREAD_SEEN stays 0 ---
 
@@ -324,91 +279,15 @@ MOCK
 
 # --- T-ESC-002: unread < 2min → standard nudge ---
 
-@test "T-ESC-002: escalation Phase 1 — unread under 2min uses standard nudge" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        now=$(date +%s)
-        FIRST_UNREAD_SEEN=$((now - 30))  # 30 seconds ago
-        age=$((now - FIRST_UNREAD_SEEN))
-        if [ "$age" -lt "$ESCALATE_PHASE1" ]; then
-            send_wakeup 2
-            echo "PHASE1_NUDGE"
-        fi
-    '
-    [ "$status" -eq 0 ]
-    echo "$output" | grep -q "PHASE1_NUDGE"
-    grep -q "send-keys.*inbox2" "$MOCK_LOG"
-    # No Escape-based nudge
-    ! grep -q "send-keys.*Escape" "$MOCK_LOG"
-}
 
 # --- T-ESC-003: unread 2-4min → Escape+nudge ---
 
-@test "T-ESC-003: escalation Phase 2 — unread 2-4min uses Escape+nudge (copilot)" {
-    # Escape escalation is suppressed for claude/codex (Stop hook / safety).
-    # Test with copilot CLI which still uses Escape escalation.
-    export MOCK_PANE_CLI="copilot"
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        now=$(date +%s)
-        FIRST_UNREAD_SEEN=$((now - 180))  # 3 minutes ago
-        age=$((now - FIRST_UNREAD_SEEN))
-        if [ "$age" -ge "$ESCALATE_PHASE1" ] && [ "$age" -lt "$ESCALATE_PHASE2" ]; then
-            send_wakeup_with_escape 3
-            echo "PHASE2_ESCAPE_NUDGE"
-        fi
-    '
-    [ "$status" -eq 0 ]
-    echo "$output" | grep -q "PHASE2_ESCAPE_NUDGE"
-    grep -q "send-keys.*C-c" "$MOCK_LOG"
-    # Escape was sent
-    grep -q "send-keys.*Escape" "$MOCK_LOG"
-    # Nudge was also sent
-    grep -q "send-keys.*inbox3" "$MOCK_LOG"
-}
 
 # --- T-ESC-004: unread > 4min → /clear sent ---
 
-@test "T-ESC-004: escalation Phase 3 — unread over 4min sends /clear" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        now=$(date +%s)
-        FIRST_UNREAD_SEEN=$((now - 300))  # 5 minutes ago
-        LAST_CLEAR_TS=0  # no recent /clear
-        age=$((now - FIRST_UNREAD_SEEN))
-        if [ "$age" -ge "$ESCALATE_PHASE2" ] && [ "$LAST_CLEAR_TS" -lt "$((now - ESCALATE_COOLDOWN))" ]; then
-            send_cli_command "/clear"
-            echo "PHASE3_CLEAR"
-        fi
-    '
-    [ "$status" -eq 0 ]
-    echo "$output" | grep -q "PHASE3_CLEAR"
-    grep -q "send-keys.*/clear" "$MOCK_LOG"
-}
 
 # --- T-ESC-005: /clear cooldown → falls back to Escape+nudge ---
 
-@test "T-ESC-005: escalation /clear cooldown — falls back to Escape+nudge (copilot)" {
-    # Escape escalation is suppressed for claude/codex. Test with copilot.
-    export MOCK_PANE_CLI="copilot"
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        now=$(date +%s)
-        FIRST_UNREAD_SEEN=$((now - 300))  # 5 minutes ago
-        LAST_CLEAR_TS=$((now - 60))  # /clear sent 1 min ago (within 5min cooldown)
-        age=$((now - FIRST_UNREAD_SEEN))
-        if [ "$age" -ge "$ESCALATE_PHASE2" ] && [ "$LAST_CLEAR_TS" -ge "$((now - ESCALATE_COOLDOWN))" ]; then
-            send_wakeup_with_escape 4
-            echo "COOLDOWN_FALLBACK"
-        fi
-    '
-    [ "$status" -eq 0 ]
-    echo "$output" | grep -q "COOLDOWN_FALLBACK"
-    grep -q "send-keys.*C-c" "$MOCK_LOG"
-    grep -q "send-keys.*Escape" "$MOCK_LOG"
-    grep -q "send-keys.*inbox4" "$MOCK_LOG"
-    ! grep -q "send-keys.*/clear" "$MOCK_LOG"
-}
 
 # --- T-BUSY-001: agent_is_busy detects "Working" ---
 
@@ -436,99 +315,33 @@ MOCK
 
 # --- T-BUSY-003: send_wakeup skips when agent is busy ---
 
-@test "T-BUSY-003: send_wakeup skips nudge when agent is busy" {
+@test "T-BUSY-003: busy でも idle でも send_wakeup は打鍵しない" {
     rm -f "$TEST_TMPDIR/shogun_idle_test_agent"
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        send_wakeup 3
-    '
+    run bash -c "source '$TEST_HARNESS' && send_wakeup 2"
     [ "$status" -eq 0 ]
-    echo "$output" | grep -qi "SKIP.*busy"
-
-    # No nudge should have been sent
-    ! grep -q "send-keys.*inbox" "$MOCK_LOG"
+    ! grep -q "send-keys" "$MOCK_LOG"
 }
 
 # --- T-BUSY-004: send_wakeup_with_escape skips when agent is busy ---
 
-@test "T-BUSY-004: send_wakeup_with_escape skips when agent is busy" {
+@test "T-BUSY-004: send_wakeup_with_escape は busy でも打鍵しない" {
     rm -f "$TEST_TMPDIR/shogun_idle_test_agent"
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        send_wakeup_with_escape 2
-    '
+    run bash -c "source '$TEST_HARNESS' && send_wakeup_with_escape 2"
     [ "$status" -eq 0 ]
-    echo "$output" | grep -qi "SKIP.*busy"
-
-    # No nudge should have been sent
-    ! grep -q "send-keys.*inbox" "$MOCK_LOG"
+    ! grep -q "send-keys" "$MOCK_LOG"
 }
 
 # --- T-CODEX-001: codex /clear → /new conversion ---
 
-@test "T-CODEX-001: send_cli_command converts /clear to /new for codex" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="codex"
-        send_cli_command "/clear"
-    '
-    [ "$status" -eq 0 ]
-
-    # Should send /new, NOT /clear
-    grep -q "send-keys.*/new" "$MOCK_LOG"
-    ! grep -q "send-keys.*/clear" "$MOCK_LOG"
-}
 
 # --- T-CODEX-002: codex /model → skip ---
 
-@test "T-CODEX-002: send_cli_command skips /model for codex" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="codex"
-        send_cli_command "/model opus"
-    '
-    [ "$status" -eq 0 ]
-
-    # No tmux send-keys for /model
-    ! grep -q "send-keys.*/model" "$MOCK_LOG"
-
-    # Stderr indicates skip
-    echo "$output" | grep -q "not supported on codex"
-}
 
 # --- T-OPENCODE-001: opencode /clear → /new conversion ---
 
-@test "T-OPENCODE-001: send_cli_command converts /clear to /new for opencode" {
-    run bash -c '
-        MOCK_CAPTURE_PANE="first line\nsecond line\nthird line\n"
-        MOCK_PANE_CLI="opencode"
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="opencode"
-        send_cli_command "/clear"
-    '
-    [ "$status" -eq 0 ]
-
-    # /clear is converted to /new after clearing stale input — no Escape or C-c sent.
-    grep -q "send-keys.*C-u" "$MOCK_LOG"
-    grep -q "send-keys.*/new" "$MOCK_LOG"
-    ! grep -q "send-keys.*/clear" "$MOCK_LOG"
-    ! grep -q "send-keys.*Escape" "$MOCK_LOG"
-    ! grep -q "send-keys.*C-c" "$MOCK_LOG"
-}
 
 # --- T-OPENCODE-002: opencode /model → skip with restart-only note ---
 
-@test "T-OPENCODE-002: send_cli_command skips /model for opencode" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="opencode"
-        send_cli_command "/model opus"
-    '
-    [ "$status" -eq 0 ]
-
-    ! grep -q "send-keys.*/model" "$MOCK_LOG"
-    echo "$output" | grep -q "restart-only"
-}
 
 # --- T-CODEX-003: C-u sent when unread=0 and agent is idle ---
 
@@ -582,72 +395,15 @@ MOCK
 
 # --- T-CODEX-005: claude /clear passes through as-is ---
 
-@test "T-CODEX-005: send_cli_command sends /clear as-is for claude" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="claude"
-        send_cli_command "/clear"
-    '
-    [ "$status" -eq 0 ]
-
-    # Should send /clear directly (not /new)
-    grep -q "send-keys.*/clear" "$MOCK_LOG"
-    ! grep -q "/new" "$MOCK_LOG"
-}
 
 # --- T-CODEX-006: inbox_watcher.sh has agent_is_busy and Codex/Copilot handlers ---
 
-@test "T-CODEX-006: inbox_watcher.sh contains agent_is_busy and Codex/Copilot handlers" {
-    grep -q "agent_is_busy()" "$WATCHER_SCRIPT"
-    # Busy detection patterns live in lib/agent_status.sh (shared library)
-    grep -q 'Working|Thinking|Planning|Sending' "$PROJECT_ROOT/lib/agent_status.sh"
-
-    # Codex /clear → /new conversion exists
-    grep -q '/new' "$WATCHER_SCRIPT"
-
-    # Codex /model skip exists
-    grep -q 'not supported on codex' "$WATCHER_SCRIPT"
-
-    # C-u cleanup exists
-    grep -q 'C-u' "$WATCHER_SCRIPT"
-
-    # Copilot handler exists
-    grep -q 'copilot --yolo' "$WATCHER_SCRIPT"
-    grep -q 'not supported on copilot' "$WATCHER_SCRIPT"
-}
 
 # --- T-CODEX-007: pane cli overrides stale CLI_TYPE in Phase2 ---
 
-@test "T-CODEX-007: pane @agent_cli=codex overrides stale CLI_TYPE for Phase2 (no C-c)" {
-    run bash -c '
-        MOCK_PANE_CLI="codex"
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="claude"
-        send_wakeup_with_escape 2
-    '
-    [ "$status" -eq 0 ]
-
-    grep -q "send-keys.*inbox2" "$MOCK_LOG"
-    # Codex: Escape escalation is suppressed (avoid interrupting work / human typing)
-    ! grep -q "send-keys.*Escape" "$MOCK_LOG"
-    ! grep -q "send-keys.*C-c" "$MOCK_LOG"
-}
 
 # --- T-CODEX-008: pane cli overrides stale CLI_TYPE in /clear path ---
 
-@test "T-CODEX-008: pane @agent_cli=codex overrides stale CLI_TYPE for /clear (uses /new)" {
-    run bash -c '
-        MOCK_PANE_CLI="codex"
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="claude"
-        send_cli_command "/clear"
-    '
-    [ "$status" -eq 0 ]
-
-    grep -q "send-keys.*/new" "$MOCK_LOG"
-    ! grep -q "send-keys.*/clear" "$MOCK_LOG"
-    ! grep -q "send-keys.*C-c" "$MOCK_LOG"
-}
 
 # --- T-CODEX-009: invalid model_switch payload is rejected ---
 
@@ -662,67 +418,9 @@ MOCK
 
 # --- T-CODEX-010: unresolved cli falls back to codex-safe ---
 
-@test "T-CODEX-010: unresolved CLI type falls back to codex-safe (/clear->/new, no C-c)" {
-    run bash -c '
-        MOCK_PANE_CLI=""
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="unknown_cli"
-        send_cli_command "/clear"
-    '
-    [ "$status" -eq 0 ]
-
-    grep -q "send-keys.*/new" "$MOCK_LOG"
-    ! grep -q "send-keys.*/clear" "$MOCK_LOG"
-    ! grep -q "send-keys.*C-c" "$MOCK_LOG"
-}
 
 # --- T-CODEX-011: clear_command auto-recovery injection ---
 
-@test "T-CODEX-011: process_unread injects auto-recovery task and sends inbox nudge after clear_command" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="codex"
-        cat > "$INBOX" << "YAML"
-messages:
-  - id: msg_clear
-    from: karo
-    timestamp: "2026-02-10T14:00:00+09:00"
-    type: clear_command
-    content: redo
-    read: false
-YAML
-        process_unread event
-        "$VENV_PYTHON" - << "PY" "$INBOX"
-import sys
-import yaml
-
-inbox_path = sys.argv[1]
-with open(inbox_path, "r", encoding="utf-8") as f:
-    data = yaml.safe_load(f) or {}
-
-messages = data.get("messages", []) or []
-msg_clear = [m for m in messages if m.get("id") == "msg_clear"]
-assert len(msg_clear) == 1 and msg_clear[0].get("read") is True
-
-auto = [
-    m for m in messages
-    if m.get("from") == "inbox_watcher"
-    and m.get("type") == "task_assigned"
-    and "[auto-recovery]" in (m.get("content") or "")
-]
-assert len(auto) == 1
-assert auto[0].get("read") is False
-print("OK")
-PY
-    '
-    [ "$status" -eq 0 ]
-    echo "$output" | grep -q "OK"
-
-    # codex clear path uses /new
-    grep -q "send-keys.*/new" "$MOCK_LOG"
-    # After /new, startup prompt is sent (replaces inbox1 nudge for wake-up)
-    grep -q "send-keys.*Session Start" "$MOCK_LOG"
-}
 
 @test "T-SHOGUN-005: process_unread does not auto-recover skipped shogun clear_command" {
     run bash -c '
@@ -773,21 +471,6 @@ PY
 
 # --- T-OPENCODE-003: OpenCode Phase 2 falls back to plain nudge ---
 
-@test "T-OPENCODE-003: send_wakeup_with_escape falls back to plain nudge for OpenCode" {
-    run bash -c '
-        MOCK_CAPTURE_PANE="first line\nsecond line\nthird line\n"
-        MOCK_PANE_CLI="opencode"
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="opencode"
-        send_wakeup_with_escape 3
-    '
-    [ "$status" -eq 0 ]
-
-    ! grep -q "send-keys.*Escape" "$MOCK_LOG"
-    ! grep -q "send-keys.*C-c" "$MOCK_LOG"
-    grep -q "send-keys.*C-u" "$MOCK_LOG"
-    grep -q "send-keys.*inbox3" "$MOCK_LOG"
-}
 
 # --- T-CODEX-012: auto-recovery dedupe ---
 
@@ -893,35 +576,9 @@ YAML
 
 # --- T-COPILOT-001: copilot /clear → Ctrl-C + restart ---
 
-@test "T-COPILOT-001: send_cli_command sends Ctrl-C + copilot restart for copilot /clear" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="copilot"
-        send_cli_command "/clear"
-    '
-    [ "$status" -eq 0 ]
-
-    # Should trigger copilot restart
-    grep -q "send-keys.*C-c" "$MOCK_LOG"
-    grep -q "send-keys.*copilot --yolo" "$MOCK_LOG"
-    # NOT /clear or /new
-    ! grep -q "send-keys.*/clear" "$MOCK_LOG"
-    ! grep -q "send-keys.*/new" "$MOCK_LOG"
-}
 
 # --- T-COPILOT-002: copilot /model → skip ---
 
-@test "T-COPILOT-002: send_cli_command skips /model for copilot" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="copilot"
-        send_cli_command "/model opus"
-    '
-    [ "$status" -eq 0 ]
-
-    ! grep -q "send-keys.*/model" "$MOCK_LOG"
-    echo "$output" | grep -q "not supported on copilot"
-}
 
 # --- T-SHOGUN-001: session_has_client — client attached ---
 
@@ -947,38 +604,9 @@ YAML
 
 # --- T-SHOGUN-003: shogun + active pane + client attached → send-keys (post PR#75) ---
 
-@test "T-SHOGUN-003: send_wakeup shogun + active + attached uses send-keys" {
-    run bash -c '
-        MOCK_PANE_ACTIVE="1"
-        MOCK_LIST_CLIENTS="/dev/pts/1: mock_session [200x50 xterm-256color]"
-        source "'"$TEST_HARNESS"'"
-        AGENT_ID="shogun"
-        send_wakeup 2
-    '
-    [ "$status" -eq 0 ]
-
-    # Post PR#75: shogun uses send-keys like other agents (display-message path removed)
-    grep -q "send-keys.*inbox2" "$MOCK_LOG"
-}
 
 # --- T-SHOGUN-004: shogun + active pane + no client → send-keys fallthrough ---
 
-@test "T-SHOGUN-004: send_wakeup shogun + active + detached falls through to send-keys" {
-    run bash -c '
-        MOCK_PANE_ACTIVE="1"
-        MOCK_LIST_CLIENTS=""
-        source "'"$TEST_HARNESS"'"
-        AGENT_ID="shogun"
-        send_wakeup 2
-    '
-    [ "$status" -eq 0 ]
-
-    # Should NOT show display-message path
-    ! echo "$output" | grep -q "DISPLAY"
-
-    # Should have used send-keys
-    grep -q "send-keys.*inbox2" "$MOCK_LOG"
-}
 
 # --- T-BUSY-005: agent_is_busy during /clear cooldown ---
 
@@ -1154,187 +782,27 @@ YAML
 
 # --- T-SHOOK-001: Claude Code throttle uses 60s cooldown (post PR#75: stop-hook supplementary) ---
 
-@test "T-SHOOK-001: Claude Code throttle uses 60s cooldown (stop-hook-supplementary)" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="claude"
-        LAST_NUDGE_TS=0
-        LAST_NUDGE_COUNT=""
-
-        # First call: should pass through (no throttle)
-        should_throttle_nudge 1
-        rc1=$?
-
-        # Simulate 60s elapsed — cooldown expired for claude (60s, same as default)
-        LAST_NUDGE_TS=$(($(date +%s) - 60))
-        LAST_NUDGE_COUNT=1
-
-        # Second call with same count after 60s: should NOT throttle (cooldown expired)
-        should_throttle_nudge 1
-        rc2=$?
-
-        echo "rc1=$rc1 rc2=$rc2"
-    '
-    [ "$status" -eq 0 ]
-    echo "$output" | grep -q "rc1=1 rc2=1"  # 1=not-throttled, 1=not-throttled (60s cooldown expired)
-}
 
 # --- T-SHOOK-002: Claude Code count change bypasses throttle (post PR#75: standard behavior) ---
 
-@test "T-SHOOK-002: Claude Code count change bypasses throttle (stop-hook-supplementary)" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="claude"
-        LAST_NUDGE_TS=0
-        LAST_NUDGE_COUNT=""
-
-        # First call: should pass through
-        should_throttle_nudge 1
-        rc1=$?
-
-        # Simulate 30s elapsed, count changed from 1 to 2
-        LAST_NUDGE_TS=$(($(date +%s) - 30))
-
-        # Post PR#75: Claude uses standard throttle logic.
-        # Count change (1→2) bypasses throttle for ALL CLIs including claude.
-        should_throttle_nudge 2
-        rc2=$?
-
-        echo "rc1=$rc1 rc2=$rc2"
-    '
-    [ "$status" -eq 0 ]
-    echo "$output" | grep -q "rc1=1 rc2=1"  # Both: 1=not-throttled (count change bypasses)
-}
 
 # --- T-SHOOK-003: Non-Claude CLIs bypass throttle on count change ---
 
-@test "T-SHOOK-003: Non-Claude CLIs still bypass throttle on count change" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="copilot"
-        LAST_NUDGE_TS=0
-        LAST_NUDGE_COUNT=""
-
-        # First call
-        should_throttle_nudge 1
-        rc1=$?
-
-        # Simulate 30s elapsed, count changed from 1 to 2
-        LAST_NUDGE_TS=$(($(date +%s) - 30))
-
-        # For copilot, count change (1→2) SHOULD bypass throttle
-        should_throttle_nudge 2
-        rc2=$?
-
-        echo "rc1=$rc1 rc2=$rc2"
-    '
-    [ "$status" -eq 0 ]
-    echo "$output" | grep -q "rc1=1 rc2=1"  # Both pass through (count changed)
-}
 
 # --- T-SHOOK-004: all-read reset clears nudge throttle for next inbox1 batch ---
 
-@test "T-SHOOK-004: all-read reset clears nudge throttle for same-count next batch" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="codex"
-        cat > "$INBOX" <<YAML
-messages: []
-YAML
-        LAST_NUDGE_TS=$(date +%s)
-        LAST_NUDGE_COUNT=1
-        FIRST_UNREAD_SEEN=123
-
-        process_unread event
-
-        should_throttle_nudge 1
-        rc=$?
-        echo "last_ts=$LAST_NUDGE_TS last_count=${LAST_NUDGE_COUNT:-empty} rc=$rc"
-    '
-    [ "$status" -eq 0 ]
-    echo "$output" | grep -q "rc=1"  # 1 = not throttled
-}
 
 # --- T-CODEX-016: Codex transcript echo is not treated as stuck input ---
 
-@test "T-CODEX-016: send_wakeup codex treats transcript echo as delivered" {
-    run bash -c '
-        MOCK_CAPTURE_PANE="$(printf "› inbox1\n  gpt-5.5 xhigh · ~/repo\n")"
-        source "'"$TEST_HARNESS"'"
-        CLI_TYPE="codex"
-        send_wakeup 1
-    '
-    [ "$status" -eq 0 ]
-
-    echo "$output" | grep -q "cli=codex"
-    ! echo "$output" | grep -q "nudge text still visible"
-    [ "$(grep -c "send-keys -t test:0.0 inbox1" "$MOCK_LOG")" -eq 1 ]
-}
 
 # --- T-CRESET-001: send_context_reset suppresses /clear for karo ---
 
-@test "T-CRESET-001: send_context_reset suppresses /clear for karo" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        AGENT_ID="karo"
-        send_context_reset
-    '
-    [ "$status" -eq 0 ]
-
-    # No send-keys should have occurred
-    ! grep -q "send-keys" "$MOCK_LOG"
-
-    # SKIP message in stderr
-    echo "$output" | grep -q "SKIP.*karo"
-}
 
 # --- T-CRESET-002: send_context_reset suppresses /clear for gunshi ---
 
-@test "T-CRESET-002: send_context_reset suppresses /clear for gunshi" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        AGENT_ID="gunshi"
-        send_context_reset
-    '
-    [ "$status" -eq 0 ]
-
-    # No send-keys should have occurred
-    ! grep -q "send-keys" "$MOCK_LOG"
-
-    # SKIP message in stderr
-    echo "$output" | grep -q "SKIP.*gunshi"
-}
 
 # --- T-CRESET-003: send_context_reset sends /clear for ashigaru ---
 
-@test "T-CRESET-003: send_context_reset sends /clear for ashigaru" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        AGENT_ID="ashigaru3"
-        CLI_TYPE="claude"
-        send_context_reset
-    '
-    [ "$status" -eq 0 ]
-
-    # /clear should have been sent via send-keys
-    grep -q "send-keys.*/clear" "$MOCK_LOG"
-}
 
 # --- T-CRESET-004: send_context_reset sends /new for opencode ---
 
-@test "T-CRESET-004: send_context_reset sends /new for opencode" {
-    run bash -c '
-        source "'"$TEST_HARNESS"'"
-        AGENT_ID="ashigaru3"
-        CLI_TYPE="opencode"
-        send_context_reset
-    '
-    [ "$status" -eq 0 ]
-
-    # C-u for input clear, then /new — no Escape (function removed)
-    grep -q "send-keys.*C-u" "$MOCK_LOG"
-    grep -q "send-keys.*/new" "$MOCK_LOG"
-    ! grep -q "send-keys.*/clear" "$MOCK_LOG"
-    ! grep -q "send-keys.*Escape" "$MOCK_LOG"
-    ! grep -q "send-keys.*C-c" "$MOCK_LOG"
-}

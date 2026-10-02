@@ -129,9 +129,9 @@ Shogun isn't locked to one vendor. The system supports 5 CLI tools, each with un
 
 | CLI | Key Strength | Default Model |
 |-----|-------------|---------------|
-| **Claude Code** | Battle-tested tmux integration, Memory MCP, dedicated file tools (Read/Write/Edit/Glob/Grep) | Claude Sonnet 4.6 |
-| **OpenAI Codex** | Sandbox execution, JSONL structured output, `codex exec` headless mode, **per-model `--model` flag** | gpt-5.3-codex / **gpt-5.3-codex-spark** |
-| **GitHub Copilot** | Built-in GitHub MCP, 4 specialized agents (Explore/Task/Plan/Code-review), `/delegate` to coding agent | Claude Sonnet 4.6 |
+| **Claude Code** | Battle-tested tmux integration, Memory MCP, dedicated file tools (Read/Write/Edit/Glob/Grep) | Claude Sonnet (`sonnet` alias) |
+| **OpenAI Codex** | Sandbox execution, JSONL structured output, `codex exec` headless mode, **per-model `--model` flag** | gpt-6-sol / **gpt-6-luna** |
+| **GitHub Copilot** | Built-in GitHub MCP, 4 specialized agents (Explore/Task/Plan/Code-review), `/delegate` to coding agent | Claude Sonnet (`sonnet` alias) |
 | **Kimi Code** | Free tier available, strong multilingual support | Kimi k2 |
 | **OpenCode** | Shared `AGENTS.md` instructions, agent-specific definitions via `--agent`, `/new` context reset, restart-only model changes, deterministic interactive TUI launch, provider-qualified `--model` routing | provider/model |
 
@@ -461,6 +461,7 @@ Then restart your computer and run `install.bat` again.
 - ✅ Auto-loads instruction files or generated agent definitions for each CLI
 - ✅ Resets queue files for a fresh state
 - ✅ Starts ntfy listener for phone notifications (if configured)
+- ✅ (Opt-in) Resumes each Claude agent's previous conversation so its Remote Control session continues instead of piling up as an orphan
 
 **After running, all agents are ready to receive commands!**
 
@@ -591,10 +592,10 @@ cli:
   agents:
     ashigaru1:
       type: codex          # codex / claude / copilot / kimi / opencode
-      model: gpt-5.5
+      model: gpt-6-luna
     ashigaru2:
       type: claude
-      model: claude-sonnet-4-6
+      model: sonnet         # alias — tracks latest (Sonnet 5.5 as of 2026-09-29)
     # Same for ashigaru3-7, gunshi, karo
 ```
 
@@ -621,9 +622,12 @@ When OpenCode is selected, `lib/cli_adapter.sh` launches it with `--agent <agent
 To switch on the fly, use `scripts/switch_cli.sh`:
 
 ```bash
-bash scripts/switch_cli.sh ashigaru3 --type claude --model claude-sonnet-4-6
-bash scripts/switch_cli.sh ashigaru3 --type opencode --model openrouter/openai/gpt-4o-mini
-bash scripts/switch_cli.sh ashigaru3 --type opencode --model openrouter/minimax/minimax-m2.5 --variant xhigh
+# --human-initiated is REQUIRED (cmd_754): the script types into a pane where an
+# agent CLI is running, so it refuses to send anything unless a human asserts they
+# are issuing this switch and watching that pane. Automated callers must never pass it.
+bash scripts/switch_cli.sh ashigaru3 --human-initiated --type claude --model sonnet
+bash scripts/switch_cli.sh ashigaru3 --human-initiated --type opencode --model openrouter/openai/gpt-4o-mini
+bash scripts/switch_cli.sh ashigaru3 --human-initiated --type opencode --model openrouter/minimax/minimax-m2.5 --variant xhigh
 ```
 
 #### 4. Switching or closing a project
@@ -728,10 +732,11 @@ Step 1: Write the message          Step 2: Wake the agent up
 │ Writes full message  │  file     │ Detects file change      │
 │ to ashigaru3.yaml    │──change──▶│ (inotifywait, not poll)  │
 │ with flock (no race) │           │                          │
-└──────────────────────┘           │ Wakes agent via:         │
-                                   │  1. Self-watch (skip)    │
-                                   │  2. tmux send-keys       │
-                                   │     (short nudge only)   │
+└──────────────────────┘           │ Delivery is carried by:  │
+                                   │  Claude → Stop hook      │
+                                   │  others → human channel  │
+                                   │  (NO keystrokes — see    │
+                                   │   cmd_754 below)         │
                                    └──────────────────────────┘
 
 Step 3: Agent reads its own inbox
@@ -743,45 +748,47 @@ Step 3: Agent reads its own inbox
 └──────────────────────────────────┘
 ```
 
-**How the wake-up works:**
+**How the wake-up works (rewritten by cmd_754 — automatic keystrokes are gone):**
 
-| Priority | Method | What happens | When used |
-|----------|--------|-------------|-----------|
-| 1st | **Self-Watch** | Agent watches its own inbox file — wakes itself, no nudge needed | Agent has its own `inotifywait` running |
-| 2nd | **Stop Hook** | Claude Code agents check inbox at turn end via `.claude/settings.json` Stop hook | Claude Code agents only |
-| 3rd | **tmux send-keys** | Sends short nudge via `tmux send-keys` (text and Enter sent separately for Codex CLI compatibility) | Fallback — disabled in ASW Phase 2+ |
+On 2026-09-08 a wake-up nudge's `Enter` selected the default option (`❯ 1. Yes`)
+of a permission modal, and a deletion the message had just forbidden was executed.
+Four successive attempts to prove keystroke safety from the rendered screen were
+all defeated. The ruling: **the set of screen states in which it is provably safe
+to type into a running agent CLI is empty.** All automatic `tmux send-keys` were
+removed. `scripts/inbox_watcher.sh` now contains **zero** `tmux send-keys` calls.
 
-**Agent Self-Watch (ASW) Phases** — Controls how aggressively the system uses `tmux send-keys` nudges:
+| CLI | Stop hook | agent self-watch | What actually delivers |
+|-----|-----------|------------------|------------------------|
+| claude | yes (registered & verified) | **none — does not exist** | Stop hook, within its window (below) |
+| codex / opencode / copilot / kimi | no | **none — does not exist** | **nothing → human channel** |
 
-| ASW Phase | Nudge behavior | Delivery method | When to use |
-|-----------|---------------|-----------------|-------------|
-| **Phase 1** | Normal nudges enabled | self-watch + send-keys | Initial setup, mixed CLI environments |
-| **Phase 2** | **Busy → suppressed, Idle → nudge** | busy: stop hook delivers at turn end. idle: nudge (unavoidable) | Claude Code agents with stop hook (recommended) |
-| **Phase 3** | `FINAL_ESCALATION_ONLY` | send-keys only as last-resort recovery | Fully stable environments |
+- **self-watch does not exist.** Every `inotifywait` visible under
+  `pgrep -f inotifywait` is a child of `inbox_watcher.sh` itself. No agent runs
+  its own watch. It is therefore not counted as a delivery channel.
+- **The Stop hook has a bounded window.** It fires when an agent's turn ends; if
+  the inbox is empty it waits up to 55 s (the hook timeout is 60 s) and then exits.
+  An agent that has been idle longer than that window is **not** reached until it
+  starts a turn on its own.
+- **Undelivered messages go to a human**, never to a stronger keystroke: after a
+  2-minute grace period the watcher counts the stall and, past the threshold,
+  notifies Karo (→ `dashboard.md` 🚨要対応). When Karo or Shogun is the stalled
+  agent, it pushes to the Lord via `scripts/ntfy.sh` instead.
 
-Phase 2 uses the idle flag file (`/tmp/shogun_idle_{agent}`) to distinguish busy vs idle agents. The Stop hook creates/removes this flag at turn boundaries. This eliminates nudge interruptions during active work while still waking idle agents.
+Special message types (`clear_command`, `model_switch`, `cli_restart`) are **kept
+unread** and escalated with the exact command a human should run — a command
+marked delivered but never actually sent would be a command silently destroyed.
 
-> **Why can't nudges be fully eliminated?** Claude Code's Stop hook only fires at turn end. An idle agent (sitting at the prompt) has no turn ending, so there's no hook to trigger inbox checks. A future `Notification` hook with `idle_prompt` blocking support or a periodic timer hook could solve this.
+`ASW_PHASE` still exists for compatibility, but Phase 2/3 only ever modulated the
+volume of nudges. With nudges gone the system is permanently past Phase 3.
 
-Configure in `config/settings.yaml`:
-```yaml
-asw_phase: 2   # Recommended for Claude Code setups
-```
-
-Or set the default directly in `scripts/inbox_watcher.sh` (`ASW_PHASE` variable). Restart inbox_watcher processes after changing.
-
-**3-Phase Escalation (v3.2)** — If agent doesn't respond:
-
-| Phase | Timing | Action |
-|-------|--------|--------|
-| Phase 1 | 0-2 min | Standard nudge (`inbox3` text + Enter) — *skipped for busy agents in ASW Phase 2+* |
-| Phase 2 | 2-4 min | Copilot/Kimi: Escape×2 + single Ctrl-C + nudge. Claude/Codex/OpenCode: plain nudge fallback |
-| Phase 3 | 4+ min | Send CLI-specific context reset: Claude/Copilot/Kimi use `/clear`, Codex/OpenCode use `/new` (max once per 5 min) |
+Full details, including everything this cost us: **`docs/delivery_channels.md`**.
 
 **Key design choices:**
-- **Message content is never sent through tmux** — only a short "you have mail" nudge. The agent reads its own file. This eliminates character corruption and transmission hangs.
-- **Zero CPU while idle** — `inotifywait` blocks on a kernel event (not a poll loop). CPU usage is 0% between messages.
-- **Guaranteed delivery** — If the file write succeeded, the message is there. No lost messages, no retries needed.
+- **Message content is never sent through tmux** — the agent reads its own file.
+- **Zero CPU while idle** — `inotifywait` blocks on a kernel event (not a poll loop).
+- **Guaranteed persistence** — If the file write succeeded, the message is there.
+- **Visible failure over invisible damage** — a stalled agent is visible; a button
+  pressed by mistake is not.
 
 ### 📊 5. Agent Status Check
 
@@ -1202,10 +1209,12 @@ SayTask handles personal productivity (capture → schedule → remind). The cmd
 
 | Agent | Default Model | Thinking | Role |
 |-------|--------------|----------|------|
-| Shogun | Opus | **Enabled (high)** | Strategic advisor to the Lord. Use `--shogun-no-thinking` for relay-only mode |
-| Karo | Sonnet | Enabled | Task distribution, simple QC, dashboard management |
-| Gunshi | Opus | Enabled | Deep analysis, design review, architecture evaluation |
-| Ashigaru 1–7 | Sonnet 4.6 | Enabled | Implementation: code, research, file operations |
+| Shogun | Fable (`fable` alias) | **Enabled (high)** | Strategic advisor to the Lord. Use `--shogun-no-thinking` for relay-only mode |
+| Karo | Sonnet (`sonnet` alias) | Enabled | Task distribution, simple QC, dashboard management |
+| Gunshi | Codex `gpt-6-sol` | Enabled | Deep analysis, design review, architecture evaluation |
+| Ashigaru 3–6 | Sonnet (`sonnet --effort xhigh`) | Enabled | Implementation: code, research, file operations |
+| Ashigaru 7 | Opus (`opus --effort xhigh`) | Enabled | Implementation: highest-capability worker |
+| Ashigaru 1–2 | Codex `gpt-6-luna` (fallback: `gpt-reserve`) | Enabled | Implementation: code, research, file operations |
 
 **Thinking control**: Set `thinking: true/false` per agent in `config/settings.yaml`. When `thinking: false`, the agent starts with `MAX_THINKING_TOKENS=0` to disable Extended Thinking. Pane borders show `+T` suffix when Thinking is enabled (e.g., `Sonnet+T`, `Opus+T`).
 
@@ -1248,16 +1257,16 @@ Beyond agent-level routing, you can configure **model-level routing within the A
 
 ```yaml
 capability_tiers:
-  gpt-5.3-codex-spark:
+  gpt-6-luna:
     max_bloom: 3       # L1–L3 only: fast, high-volume tasks
     cost_group: chatgpt_pro
-  gpt-5.3-codex:
+  gpt-6-sol:
     max_bloom: 4       # L1–L4: + analysis and debugging
     cost_group: chatgpt_pro
-  claude-sonnet-4-6:
+  sonnet:
     max_bloom: 5       # L1–L5: + design evaluation
     cost_group: claude_max
-  claude-opus-4-6:
+  opus:
     max_bloom: 6       # L1–L6: + novel architecture, strategy
     cost_group: claude_max
 ```
@@ -1516,6 +1525,47 @@ Priority: Token > Basic > None. If neither is set, no auth headers are sent (bac
 
 `config/ntfy_auth.env` is excluded from git. See `config/ntfy_auth.env.sample` for details.
 
+### Claude conversation resume on redeploy (Remote Control)
+
+If you keep Claude Code's Remote Control on for every session, each `shutsujin_departure.sh` run used to add one new item per Claude agent to the Code tab of the Claude app, leaving the previous items behind as orphans. With this opt-in, the script records each Claude agent's conversation ID right before it tears the old sessions down, and relaunches that agent with `claude --resume <sessionId>`. Claude Code then reconnects the Remote Control session recorded in that conversation, so the same item comes back online.
+
+```yaml
+# config/settings.yaml
+cli:
+  claude_session_resume: true   # default: disabled (key absent)
+```
+
+- The IDs are read-only snapshots taken just before `tmux kill-session`. Each run writes its own capture to `queue/state/claude_session_snapshot.current.yaml`; `queue/state/claude_session_snapshot.yaml` keeps the last real capture (left byte-for-byte when every Claude agent was verifiably absent before teardown, replaced by this run's capture otherwise). Nothing is typed into the running panes.
+- An agent falls back to a normal fresh launch whenever its ID can't be verified: no record, no transcript, `--clean`, no running sessions (e.g. after a reboot, unless the separate option below is on), or a non-Claude CLI. Deployment never stops.
+- If a `--resume` launch still exits with an error right after starting (within 30 seconds), the same pane switches to one normal fresh launch (this is built into the single launch line typed into the pane, as before). Exits after 30 seconds of running, clean exits (rc=0), and signal terminations don't trigger it, and a failing fresh launch is never retried. The 30 seconds are measured on the monotonic clock (`/proc/uptime`), so wall-clock adjustments can't skew the check; where `/proc/uptime` can't be read (e.g. macOS), it never switches and prints the reason to stderr.
+- The first run after enabling still creates one new item per agent; from the second run on, the items continue.
+- With this opt-in, every Claude launch (resume or fresh, including `--clean` and the fallback launch above) ends with a fixed one-word startup prompt, `run-session-start-procedure`. Claude writes a conversation transcript only once it receives its first input, and a conversation without a transcript can't be resumed on the next run. The word makes Claude write the transcript at startup and kicks off the usual Session Start procedure; it grants no other permission or task. Codex and other non-Claude CLIs are unchanged. The SessionStart hook output now ends with a line that changes on every call (the launch time), so the procedure is re-injected on resume as well.
+- An agent that was torn down before it ever received input has no transcript, so the next run still launches it fresh once (one new item: the "seeding" run). From the run after that, it resumes like the others, and that is the run on which to confirm zero new items.
+- Archive only true orphans in the app. An item that belongs to a live agent is unarchived again on its next resume.
+- If reconnection fails, Claude Code shows "Previous session is unavailable" and the agent keeps working locally without Remote Control.
+- Don't toggle `/remote-control` inside an agent: every reconnect creates a new item.
+- Resume manually by ID (`claude --resume <sessionId>`), not by name. Name lookup opens an interactive picker when several conversations share the name, which is normal here because `/clear` carries the name over.
+
+#### Reusing the previous snapshot after a WSL restart or crash (separate opt-in)
+
+After a WSL restart or a crash there is no running Claude agent left to record, so every Claude agent used to start fresh and leave its item behind as an orphan. A second switch lets the script reuse the IDs from the last real snapshot, under strict conditions:
+
+```yaml
+# config/settings.yaml
+cli:
+  claude_session_resume: true
+  claude_session_resume_previous_snapshot: true   # default: disabled; works only with the switch above
+```
+
+- Only agents that were verifiably absent before teardown qualify: tmux states that the server or session doesn't exist (or the pane is a bare shell), **and** a scan of `/proc` finds no Claude process with that role name. "Couldn't read" is never treated as "absent" (a child-process scan that fails counts as unreadable even when it prints nothing), and any live Claude process of the same user whose session record can't be verified closes this path for that run.
+- For each agent, the snapshot ID must belong to the same role in this run's target list (exactly once), have a non-empty, parseable transcript under the current launch directory's project folder, end with the same Remote Control bridge the snapshot recorded, be at most 7 days old (snapshot and transcript), and not be in use by any live process (by ID, bridge, or role name). Otherwise that agent starts fresh and the reason is logged.
+- Age: within the same boot it is measured on the monotonic clock (`/proc/uptime`); across a reboot, or for the older snapshot format, on the timezone-aware wall clock. Future timestamps are rejected, and a newer transcript never extends the snapshot's age.
+- The launch plan (`queue/state/claude_session_plan.yaml`) is built once per run and rejects duplicate IDs or bridges across agents. Right before each reused launch, the pane runs `lib/claude_session_resume.sh --check-previous`; if the ID, its bridge, or the role is now in use, the pane launches fresh exactly once. Runs are serialized with `flock` (`queue/state/shutsujin.lock`); a second concurrent run stops before tearing anything down.
+- `--clean` invalidates the snapshot (even with resume off), so an older conversation is never revived after a clean start.
+- Linux only (`/proc`, `flock`). Elsewhere this path stays off and the normal resume works as before. It cannot stop someone from starting the same ID by hand at the same moment, so don't. Confirming that the same bridge actually comes back after a real WSL restart still needs a visual check in the app.
+
+Details: [docs/claude_session_resume.md](docs/claude_session_resume.md) (Japanese), section 8.
+
 ---
 
 ## Advanced
@@ -1669,6 +1719,7 @@ multi-agent-shogun/
 │
 ├── lib/
 │   ├── agent_status.sh       # Shared busy/idle detection (Claude Code + Codex + OpenCode)
+│   ├── claude_session_resume.sh # Opt-in: resume Claude conversations on redeploy (Remote Control)
 │   ├── cli_adapter.sh        # Multi-CLI adapter (Claude/Codex/Copilot/Kimi/OpenCode)
 │   └── ntfy_auth.sh          # ntfy authentication helper
 │
@@ -1827,10 +1878,10 @@ tmux attach-session -t multiagent
 
 ```bash
 # Method 1: Run claude directly in the pane
-claude --model opus --dangerously-skip-permissions
+claude --model fable --dangerously-skip-permissions
 
 # Method 2: Karo force-restarts via respawn-pane (also fixes nesting)
-tmux respawn-pane -t shogun:0.0 -k 'claude --model opus --dangerously-skip-permissions'
+tmux respawn-pane -t shogun:0.0 -k 'claude --model fable --dangerously-skip-permissions'
 ```
 
 **If you accidentally nested tmux:**

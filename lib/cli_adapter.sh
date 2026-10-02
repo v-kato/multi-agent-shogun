@@ -4,12 +4,13 @@
 #
 # 提供関数:
 #   get_cli_type(agent_id)                  → "claude" | "codex" | "copilot" | "kimi" | "opencode"
-#   build_cli_command(agent_id)             → 完全なコマンド文字列
+#   build_cli_command(agent_id [,resume_id]) → 完全なコマンド文字列(resume_id は Claude のみ・cmd_785)
 #   get_instruction_file(agent_id [,cli_type]) → 指示書パス
 #   validate_cli_availability(cli_type)     → 0=OK, 1=NG
 #   get_agent_model(agent_id)               → "opus" | "sonnet" | "haiku" | "k2.5"
 #   get_startup_prompt(agent_id)            → 初期プロンプト文字列 or ""
 #   get_startup_prompt_arg(agent_id)        → 起動コマンド向けプロンプト引数 or ""
+#   get_claude_startup_token(agent_id)      → Claude 起動時の固定の1語 or ""(opt-in 時のみ・cmd_785)
 
 # プロジェクトルートを基準にsettings.yamlのパスを解決
 CLI_ADAPTER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,10 +39,22 @@ normalize_opencode_model() {
         gpt-5.4-mini|gpt-5.4|gpt-5.3-codex|gpt-5.3-codex-spark|gpt-5*)
             echo "openai/${model}"
             ;;
-        claude-opus-4-6|opus)
+        gpt-6-sol|gpt-6-luna|gpt-reserve|gpt-6*)
+            echo "openai/${model}"
+            ;;
+        claude-fable-5-1|fable)
+            echo "anthropic/claude-fable-5-1"
+            ;;
+        claude-opus-5-5|opus)
+            echo "anthropic/claude-opus-5-5"
+            ;;
+        claude-opus-4-6)
             echo "anthropic/claude-opus-4-6"
             ;;
-        claude-sonnet-4-6|sonnet)
+        claude-sonnet-5-5|sonnet)
+            echo "anthropic/claude-sonnet-5-5"
+            ;;
+        claude-sonnet-4-6)
             echo "anthropic/claude-sonnet-4-6"
             ;;
         claude-haiku-4-5-20251001|haiku)
@@ -174,11 +187,18 @@ except Exception as e:
     fi
 }
 
-# build_cli_command(agent_id)
+# build_cli_command(agent_id [, resume_session_id])
 # エージェントを起動するための完全なコマンド文字列を返す
 # settings.yaml の thinking: false → MAX_THINKING_TOKENS=0 を先頭に付与
+# resume_session_id(cmd_785): Claude の時だけ `--resume <id>` を付ける。
+#   小文字16進の UUID 形式でなければ付けない(値をシェルへ渡す前の検査)。
+#   Claude 以外の CLI では無視する。
+# 末尾には get_startup_prompt_arg を付ける(Codex の初期プロンプト、opt-in 時の
+#   Claude の固定の1語)。resume の有無に関わらず同じ形で付くので、resume 起動は
+#   新規起動に ` --resume <id>` を足しただけの形のまま保たれる。
 build_cli_command() {
     local agent_id="$1"
+    local resume_session_id="${2:-}"
     local cli_type
     cli_type=$(get_cli_type "$agent_id")
     local model
@@ -199,9 +219,23 @@ build_cli_command() {
     case "$cli_type" in
         claude)
             cmd="claude"
+            if [[ -n "$resume_session_id" ]]; then
+                if [[ "$resume_session_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+                    cmd="$cmd --resume $resume_session_id"
+                else
+                    echo "[cli_adapter] resume_session_id の形式が不正なため無視する(新規起動): agent=${agent_id}" >&2
+                fi
+            fi
             if [[ -n "$model" ]]; then
                 cmd="$cmd --model $model"
             fi
+            # cmd_759 A-1: peer名を@agent_idそのものに固定する。
+            # 値はagent_id文字列とbyte一致させる(_cli_adapter_shell_quoteは
+            # shogun/karo/ashigaru{N}/gunshiのような安全な文字列には
+            # 何も付け足さないため、一致は保たれる)。
+            local quoted_agent_id
+            quoted_agent_id=$(_cli_adapter_shell_quote "$agent_id")
+            cmd="$cmd --name $quoted_agent_id"
             cmd="$cmd $permission_flag"
             ;;
         codex)
@@ -443,7 +477,10 @@ get_model_display_name() {
 # get_startup_prompt(agent_id)
 # CLIが初回起動時に自動実行すべき初期プロンプトを返す
 # Codex CLI: [PROMPT]引数として渡す（サジェストUI停止問題の根本対策）
-# Claude Code: 空（CLAUDE.md自動読込でSession Start手順が起動）
+# Claude Code: 空（CLAUDE.md自動読込でSession Start手順が起動）。起動コマンドに
+#   付ける opt-in の固定の1語は get_claude_startup_token(get_startup_prompt_arg 経由)
+#   であり、ここでは返さない(本関数は inbox_watcher.sh が /clear 後に打鍵する文面の
+#   出所でもあるため、Claude の文面を変えない)。
 # Copilot/Kimi: 空（今後対応）
 # OpenCode: 空（.opencode/agents/が自動読込）
 get_startup_prompt() {
@@ -461,14 +498,65 @@ get_startup_prompt() {
     esac
 }
 
+# ─── Claude 系の起動時の固定プロンプト(cmd_785 Phase 1b) ───
+# cli.claude_session_resume: true(opt-in)の Claude 系にだけ、起動コマンドの末尾へ
+# この1語を付ける(get_startup_prompt_arg 経由で build_cli_command と、
+# shutsujin_departure.sh の決戦の陣の手組み起動が使う)。
+#   目的: Claude は最初の入力が来るまで会話の転写を作らない。転写の無い会話は次の
+#     出陣で --resume できず、同じ Remote Control 項目へ戻れない(孤児が増える)。
+#     起動と同時に1件入力して転写を作り、SessionStart hook が注入する Session Start
+#     手順を始めるきっかけにする(context/cmd_785_phase1b_experiment.md)。
+#   - 手順を始める合図に限る。別の権限・タスクを与えない(手順と status の扱いは
+#     hook と CLAUDE.md が正本)。
+#   - 定数。role・task・環境変数を差し込まない(ここで代入するので環境変数では
+#     変わらない)。
+#   - 引用符の要らない語に限る。resume 起動と新規起動に同じ形で付き、
+#     claude_resume_launch_cmd の照合と危険文字検査を緩めずに通るようにするため。
+CLAUDE_STARTUP_TOKEN='run-session-start-procedure'
+# 許可リスト: 小文字英数字の語を '-' で3語以上つないだもの。空白・引用符・展開・
+# グロブの文字を含まない。1〜2語は claude のサブコマンド(rm・update・auto-mode 等)
+# と取り違え得るので認めない。
+_CLAUDE_STARTUP_TOKEN_RE='^[a-z0-9]+(-[a-z0-9]+){2,}$'
+
+# _cli_adapter_claude_session_resume_enabled
+# settings の cli.claude_session_resume が真なら 0。lib/claude_session_resume.sh の
+# claude_resume_enabled と同じ判定を、cli_adapter だけを読む呼出し元
+# (scripts/switch_cli.sh 等)でも効くようにここにも置く。
+_cli_adapter_claude_session_resume_enabled() {
+    case "$(_cli_adapter_read_yaml "cli.claude_session_resume" "false")" in
+        True|true|yes|on|1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# get_claude_startup_token(agent_id)
+# Claude 系・opt-in 真・定数が許可リストを通る、の全てを満たす時だけ
+# CLAUDE_STARTUP_TOKEN を出す。それ以外は空(従来の起動)。許可リストに
+# 合わない時は付けず、理由を stderr へ出す。
+get_claude_startup_token() {
+    local agent_id="$1"
+    [[ "$(get_cli_type "$agent_id")" == "claude" ]] || return 0
+    _cli_adapter_claude_session_resume_enabled || return 0
+    if [[ ! "$CLAUDE_STARTUP_TOKEN" =~ $_CLAUDE_STARTUP_TOKEN_RE ]]; then
+        echo "[cli_adapter] 起動時の固定プロンプトが許可リストに合わないため付けない(従来の起動): agent=${agent_id}" >&2
+        return 0
+    fi
+    printf '%s\n' "$CLAUDE_STARTUP_TOKEN"
+}
+
 # get_startup_prompt_arg(agent_id)
 # 起動コマンドに埋め込むCLI-specificの初期プロンプト引数を返す
 # Codex: positional prompt
+# Claude: opt-in の時だけ固定の1語(get_claude_startup_token。引用しない)
 # その他: 空
 get_startup_prompt_arg() {
     local agent_id="$1"
     local cli_type
     cli_type=$(get_cli_type "$agent_id")
+    if [[ "$cli_type" == "claude" ]]; then
+        get_claude_startup_token "$agent_id"
+        return 0
+    fi
     local startup_prompt
     startup_prompt=$(get_startup_prompt "$agent_id")
 
@@ -1150,16 +1238,18 @@ except Exception:
 #   $1: recommended_model — get_recommended_model() の返り値
 #
 # 返り値:
-#   空き足軽ID (例: "ashigaru4") — 完全一致またはフォールバック
+#   空き足軽ID (例: "ashigaru4") — 完全一致または上位tierフォールバック (model-switch不要)
+#   "SWITCH:<agent_id>:<required_model>" — 下位tierフォールバック (呼出元でmodel-switch必要)
 #   全員ビジー → "QUEUE"
 #   エラー → "" (空文字)
 #
 # 使用例:
-#   agent=$(find_agent_for_model "claude-sonnet-4-6")
+#   agent=$(find_agent_for_model "sonnet")
 #   case "$agent" in
-#     QUEUE) echo "待機キューに積む" ;;
-#     "")    echo "エラー" ;;
-#     *)     echo "足軽: $agent に振る（karo.mdがCLI切り替えを判断）" ;;
+#     QUEUE)    echo "待機キューに積む" ;;
+#     SWITCH:*) echo "下位tier: model-switch後に割り当て" ;;
+#     "")       echo "エラー" ;;
+#     *)        echo "足軽: $agent に振る（上位tierも含む）" ;;
 #   esac
 find_agent_for_model() {
     local recommended_model="$1"
@@ -1175,11 +1265,17 @@ find_agent_for_model() {
     candidates=$("$CLI_ADAPTER_PROJECT_ROOT/.venv/bin/python3" -c "
 import yaml, sys
 
+def _base_model(m):
+    # --effort等のCLIフラグを除いたベースmodel id（先頭トークン）を返す
+    m = (m or '').strip()
+    return m.split()[0] if m else ''
+
 try:
     with open('${settings}') as f:
         cfg = yaml.safe_load(f) or {}
     cli_cfg = cfg.get('cli', {})
     agents = cli_cfg.get('agents', {})
+    target = _base_model('${recommended_model}')
 
     results = []
     for agent_id, spec in agents.items():
@@ -1188,8 +1284,8 @@ try:
             continue
         if not isinstance(spec, dict):
             continue
-        agent_model = spec.get('model', '')
-        if agent_model == '${recommended_model}':
+        agent_model = _base_model(spec.get('model', ''))
+        if agent_model == target:
             results.append(agent_id)
 
     # 番号順にソート（ashigaru1, ashigaru2, ...）
@@ -1240,52 +1336,118 @@ except Exception:
         fi
     done
 
-    # フェーズ2: 完全一致が全員ビジー → 任意のアイドル足軽にフォールバック
-    # 殿の方針: 「Codex 5.3が欲しくて Claude Code しか空いていなければ Claude Code で可」
-    # kill/restart は絶対しない。アイドルペインを再利用する。
-    local all_agents
-    all_agents=$("$CLI_ADAPTER_PROJECT_ROOT/.venv/bin/python3" -c "
+    # フェーズ2: 完全一致が全員ビジー → tier-aware フォールバック (f513fcc 復元 cmd_486)
+    # Phase 2: 上位tier (agent_bloom > req_bloom) → model-switch不要・そのまま返す
+    # Phase 3: 下位tier (0 < agent_bloom < req_bloom) → SWITCH:<agent_id>:<required_model>
+    # 殿確定 Q1=(a): 上位tier昇格を許可 (全 busy 時の上位 fallback は品質担保のため許可)
+    local req_bloom
+    req_bloom=$("$CLI_ADAPTER_PROJECT_ROOT/.venv/bin/python3" -c "
+import yaml, sys
+
+def _base_model(m):
+    # --effort等のCLIフラグを除いたベースmodel id（先頭トークン）を返す
+    m = (m or '').strip()
+    return m.split()[0] if m else ''
+
+try:
+    with open('${settings}') as f:
+        cfg = yaml.safe_load(f) or {}
+    tiers = cfg.get('capability_tiers')
+    target = _base_model('${recommended_model}')
+    spec = tiers.get(target) if isinstance(tiers, dict) else None
+    if not spec or not isinstance(spec, dict):
+        # capability_tiers未登録モデル → 制約なし（switch不要のPhase 2を
+        # 任意tierの空き足軽に対して素通しし、意図しない下位tier降格を防ぐ）
+        print('0'); sys.exit(0)
+    mb = spec.get('max_bloom', 6)
+    print(mb if isinstance(mb, int) and 1 <= mb <= 6 else 6)
+except Exception:
+    print('6')
+" 2>/dev/null)
+    [[ -z "$req_bloom" ]] && req_bloom=6
+
+    local all_agents_info
+    all_agents_info=$("$CLI_ADAPTER_PROJECT_ROOT/.venv/bin/python3" -c "
 import yaml
+
+def _base_model(m):
+    # --effort等のCLIフラグを除いたベースmodel id（先頭トークン）を返す。
+    # 出力行はbash側で read -r fb_agent fb_model fb_bloom によりスペース区切りで
+    # 分割されるため、フラグ付きの生文字列をそのまま出すとフィールドがずれる。
+    m = (m or '').strip()
+    return m.split()[0] if m else ''
 
 try:
     with open('${settings}') as f:
         cfg = yaml.safe_load(f) or {}
     agents = cfg.get('cli', {}).get('agents', {})
-    results = [k for k in agents if k.startswith('ashigaru')]
-    results.sort(key=lambda x: int(x.replace('ashigaru', '')) if x.replace('ashigaru', '').isdigit() else 99)
-    print(' '.join(results))
+    tiers = cfg.get('capability_tiers', {})
+    if not isinstance(tiers, dict):
+        tiers = {}
+    target = _base_model('${recommended_model}')
+    results = []
+    for agent_id, spec in agents.items():
+        if not agent_id.startswith('ashigaru'):
+            continue
+        if not isinstance(spec, dict):
+            continue
+        amodel = _base_model(spec.get('model', ''))
+        if amodel == target:
+            continue
+        tier_spec = tiers.get(amodel, {})
+        ab = tier_spec.get('max_bloom', 6) if isinstance(tier_spec, dict) else 6
+        results.append((agent_id, amodel, ab))
+    results.sort(key=lambda x: int(x[0].replace('ashigaru', '')) if x[0].replace('ashigaru', '').isdigit() else 99)
+    for r in results:
+        print(f'{r[0]} {r[1]} {r[2]}')
 except Exception:
     pass
 " 2>/dev/null)
 
-    local fallback
-    for fallback in $all_agents; do
-        # 既に candidates でチェック済みはスキップ
-        if [[ " $candidates " == *" $fallback "* ]]; then
-            continue
-        fi
-
-        local fb_pane
-        fb_pane=$(tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{@agent_id}' 2>/dev/null \
-            | awk -v agent="$fallback" '$2 == agent {print $1}' | head -1)
-
-        if [[ -z "$fb_pane" ]]; then
-            # tmuxセッションなし（テスト環境）→ フォールバック候補を返す
-            echo "$fallback"
-            return 0
-        fi
-
-        if declare -f agent_is_busy_check >/dev/null 2>&1; then
-            agent_is_busy_check "$fb_pane" 2>/dev/null
-            local fb_rc=$?
-            if [[ $fb_rc -eq 1 ]]; then
-                echo "$fallback"
+    # Phase 2: 上位tier (agent_bloom > req_bloom) → そのまま返す
+    local fb_agent fb_model fb_bloom
+    while read -r fb_agent fb_model fb_bloom; do
+        [[ -z "$fb_agent" ]] && continue
+        if [[ "$fb_bloom" -gt "$req_bloom" ]] 2>/dev/null; then
+            local fb_pane
+            fb_pane=$(tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{@agent_id}' 2>/dev/null \
+                | awk -v agent="$fb_agent" '$2 == agent {print $1}' | head -1)
+            if [[ -z "$fb_pane" ]]; then
+                echo "$fb_agent"
                 return 0
             fi
+            if declare -f agent_is_busy_check >/dev/null 2>&1; then
+                agent_is_busy_check "$fb_pane" 2>/dev/null
+                if [[ $? -eq 1 ]]; then
+                    echo "$fb_agent"
+                    return 0
+                fi
+            fi
         fi
-    done
+    done <<< "$all_agents_info"
 
-    # 全足軽ビジー → キュー待ち
+    # Phase 3: 下位tier (0 < agent_bloom < req_bloom) → SWITCH形式
+    while read -r fb_agent fb_model fb_bloom; do
+        [[ -z "$fb_agent" ]] && continue
+        if [[ "$fb_bloom" -gt 0 && "$fb_bloom" -lt "$req_bloom" ]] 2>/dev/null; then
+            local fb_pane
+            fb_pane=$(tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{@agent_id}' 2>/dev/null \
+                | awk -v agent="$fb_agent" '$2 == agent {print $1}' | head -1)
+            if [[ -z "$fb_pane" ]]; then
+                echo "SWITCH:${fb_agent}:${recommended_model}"
+                return 0
+            fi
+            if declare -f agent_is_busy_check >/dev/null 2>&1; then
+                agent_is_busy_check "$fb_pane" 2>/dev/null
+                if [[ $? -eq 1 ]]; then
+                    echo "SWITCH:${fb_agent}:${recommended_model}"
+                    return 0
+                fi
+            fi
+        fi
+    done <<< "$all_agents_info"
+
+    # Phase 4: 全足軽ビジー → キュー待ち
     echo "QUEUE"
     return 0
 }

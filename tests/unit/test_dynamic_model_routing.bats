@@ -372,6 +372,63 @@ bloom_model_preference:
     - claude-haiku-4-5-20251001
 YAML
 
+    # cmd_783 Phase 1 redo1 (G783-01是正回帰): config/settings.yaml の
+    # 新陣容(殿確定・cmd_783)相当のfixture。capability_tiersキーを
+    # gpt-6-luna/sonnet/opus へ更新した後も、L1-L2→Luna(ashigaru1/2)、
+    # L3-L5→Sonnet(ashigaru3-6)、L6→Opus(ashigaru7)が正しく届くことを
+    # 確認する。max_bloom(2/5/6)・cost_groupは実設定と同値。
+    cat > "${TEST_TMP}/settings_cmd783_lineup.yaml" << 'YAML'
+capability_tiers:
+  claude-haiku-4-5-20251001:
+    max_bloom: 2
+    cost_group: claude_max
+  gpt-6-luna:
+    max_bloom: 2
+    cost_group: chatgpt_pro
+  sonnet:
+    max_bloom: 5
+    cost_group: claude_max
+  opus:
+    max_bloom: 6
+    cost_group: claude_max
+available_cost_groups:
+  - claude_max
+  - chatgpt_pro
+cli:
+  default: claude
+  agents:
+    shogun:
+      type: claude
+      model: fable
+    karo:
+      type: claude
+      model: sonnet
+    gunshi:
+      type: codex
+      model: gpt-6-sol
+    ashigaru1:
+      type: codex
+      model: gpt-6-luna
+    ashigaru2:
+      type: codex
+      model: gpt-6-luna
+    ashigaru3:
+      type: claude
+      model: sonnet --effort xhigh
+    ashigaru4:
+      type: claude
+      model: sonnet --effort xhigh
+    ashigaru5:
+      type: claude
+      model: sonnet --effort xhigh
+    ashigaru6:
+      type: claude
+      model: sonnet --effort xhigh
+    ashigaru7:
+      type: claude
+      model: opus --effort xhigh
+YAML
+
     # .venvへのsymlinkを作成
     if [ -d "${PROJECT_ROOT}/.venv" ]; then
         ln -sf "${PROJECT_ROOT}/.venv" "${TEST_TMP}/.venv"
@@ -381,6 +438,20 @@ YAML
 teardown() {
     rm -rf "$TEST_TMP"
 }
+
+# ★tmux スタブ (cmd_754 redo1) — 本ファイルを環境非依存にする。
+#   find_agent_for_model() は候補足軽の実 pane を `tmux list-panes -a` で
+#   逆引きし agent_is_busy_check() へ掛ける。TC-FAM 群の NOTE は
+#   「ユニットテスト環境では tmux セッションが存在しない」ことを前提と
+#   しているが、稼働中の multiagent session を持つ開発機ではその前提が崩れ、
+#   そのとき実際に稼働していた足軽が候補から外れて TC-FAM-003 が環境依存で
+#   FAIL していた(cmd_754 初版の全件回帰 769/770)。
+#   ★実 tmux には一切触れず、NOTE の前提を固定して判定を決定的にする。
+#   ★定義位置は teardown より後でなければならぬ。setup 内へ置くと
+#     teardown の `rm -rf "$TEST_TMP"` が下へずれ、行番号で本ファイルを
+#     参照している tests/unit/test_rm_rf_d002e1_checker.bats を壊す。
+tmux() { return 1; }
+export -f tmux
 
 # ヘルパー: 特定のsettings.yamlでcli_adapterをロード
 load_adapter_with() {
@@ -1128,4 +1199,74 @@ print(len(doc.get('history', [])))
     # bloom=2, L1-L2の1番目=gpt-5.3-codex-spark(chatgpt_pro) → 除外されずに選択
     result=$(get_recommended_model 2)
     [ "$result" = "gpt-5.3-codex-spark" ]
+}
+
+# =============================================================================
+# TC-DMR-500〜508: cmd_783 Phase 1 redo1 (G783-01是正回帰)
+# 新陣容(殿確定・cmd_783)相当のfixtureで、capability_tiersキー更新後も
+# L1〜L6のBloom割当が正しく実agentへ届くことを確認する。
+# 軍師QC(context/cmd_783_qc.md G783-01)が実設定で再現した破綻
+# (新陣容の足軽が未登録扱いとなりL3〜L5が誤配分・L6がQUEUE化する)の
+# 再発を防ぐ。
+# =============================================================================
+
+@test "TC-DMR-500: cmd_783新陣容 — L1 → gpt-6-luna" {
+    load_adapter_with "${TEST_TMP}/settings_cmd783_lineup.yaml"
+    result=$(get_recommended_model 1)
+    [ "$result" = "gpt-6-luna" ]
+}
+
+@test "TC-DMR-501: cmd_783新陣容 — L2 → gpt-6-luna" {
+    load_adapter_with "${TEST_TMP}/settings_cmd783_lineup.yaml"
+    result=$(get_recommended_model 2)
+    [ "$result" = "gpt-6-luna" ]
+}
+
+@test "TC-DMR-502: cmd_783新陣容 — L3 → sonnet" {
+    load_adapter_with "${TEST_TMP}/settings_cmd783_lineup.yaml"
+    result=$(get_recommended_model 3)
+    [ "$result" = "sonnet" ]
+}
+
+@test "TC-DMR-503: cmd_783新陣容 — L4 → sonnet" {
+    load_adapter_with "${TEST_TMP}/settings_cmd783_lineup.yaml"
+    result=$(get_recommended_model 4)
+    [ "$result" = "sonnet" ]
+}
+
+@test "TC-DMR-504: cmd_783新陣容 — L5 → sonnet" {
+    load_adapter_with "${TEST_TMP}/settings_cmd783_lineup.yaml"
+    result=$(get_recommended_model 5)
+    [ "$result" = "sonnet" ]
+}
+
+@test "TC-DMR-505: cmd_783新陣容 — L6 → opus" {
+    load_adapter_with "${TEST_TMP}/settings_cmd783_lineup.yaml"
+    result=$(get_recommended_model 6)
+    [ "$result" = "opus" ]
+}
+
+@test "TC-DMR-506: cmd_783新陣容 — L1〜L2推奨モデルの空き足軽はashigaru1〜2(Luna)" {
+    load_adapter_with "${TEST_TMP}/settings_cmd783_lineup.yaml"
+    for bloom in 1 2; do
+        model=$(get_recommended_model "$bloom")
+        agent=$(find_agent_for_model "$model")
+        [[ "$agent" =~ ^ashigaru[12]$ ]]
+    done
+}
+
+@test "TC-DMR-507: cmd_783新陣容 — L3〜L5推奨モデルの空き足軽はashigaru3〜6(Sonnet)" {
+    load_adapter_with "${TEST_TMP}/settings_cmd783_lineup.yaml"
+    for bloom in 3 4 5; do
+        model=$(get_recommended_model "$bloom")
+        agent=$(find_agent_for_model "$model")
+        [[ "$agent" =~ ^ashigaru[3-6]$ ]]
+    done
+}
+
+@test "TC-DMR-508: cmd_783新陣容 — L6推奨モデルの空き足軽はashigaru7(Opus)。QUEUEに落ちない" {
+    load_adapter_with "${TEST_TMP}/settings_cmd783_lineup.yaml"
+    model=$(get_recommended_model 6)
+    agent=$(find_agent_for_model "$model")
+    [ "$agent" = "ashigaru7" ]
 }

@@ -98,11 +98,31 @@ result:
     - "ashigaru3のコンテキスト消費が早い"
   files_modified: []
   notes: "追加情報"
+gate:
+  shogun_submission: READY  # READY | BLOCKED | N_A
 skill_candidate:
   found: false
 ```
 
-**Required fields**: worker_id, task_id, parent_cmd, status, timestamp, result, skill_candidate.
+**Required fields**: worker_id, task_id, parent_cmd, status, timestamp, result, gate, skill_candidate.
+
+### gate.shogun_submission(必須・cmd_715)
+
+家老がdashboard.mdの🚨要対応/🔄進行中を機械的に判定するための引き金。
+**全てのQC report**(中間QCを含む)に必須出力する。省略・任意運用は
+禁止(現役gunshi_report 202件中5件しか本フィールドを持たず、当日埋もれ
+た3件中1件しか捕まえられなかった事故の是正)。
+
+| 値 | 意味 |
+|----|------|
+| `READY` | 全Phase完了・将軍上申準備完了 |
+| `BLOCKED` | redo中等、現時点では将軍へ上申できない |
+| `N_A` | この report は将軍上申を要さない(中間QC等) |
+
+`READY`を出した時点で、家老はdashboard.md上の当該cmdを🔄進行中から
+🚨要対応【将軍手番】へ即座に移す(`instructions/common/protocol.md`
+「機械的トリガー(cmd_715改訂)」参照)。判定に迷う場合は`BLOCKED`側へ
+倒す(fail-safe)。
 
 ## Analysis Depth Guidelines
 

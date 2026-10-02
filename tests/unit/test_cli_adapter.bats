@@ -13,6 +13,25 @@ setup() {
     # プロジェクトルート
     PROJECT_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 
+    # ★実 tmux の隔離 (cmd_791 A)
+    #   find_agent_for_model() は候補足軽の実 pane を `tmux list-panes -a` で
+    #   逆引きし agent_is_busy_check() へ掛ける。T-1〜T-3 は「tmux セッションが
+    #   存在しない」ことを前提に期待値を置いているが、稼働中の足軽 pane を持つ
+    #   環境ではその前提が崩れ、pane の busy/idle で結果が変わっていた
+    #   (T-3 は該当足軽が busy だと SWITCH が返らず FAIL)。
+    #   ★T-1〜T-3 の題名の「該当足軽なし」等は fixture が作る tier の有無を指す。
+    #     隔離下では pane が引けず候補は空き(pane 不在)扱いとなり、busy 判定経路は
+    #     通らない。busy 判定そのものの検査は T-BUSY 群(test_send_wakeup.bats)の責務。
+    #   tmux クライアントの到達先を、この試験専用の空領域へ向けて実 tmux サーバ
+    #   へ届かなくする。★$TMUX(稼働中サーバのソケット)が設定されていると tmux は
+    #   TMUX_TMPDIR より$TMUX を優先するため、TMUX_TMPDIR の切替と unset の
+    #   両方が要る。片方だけでは隔離にならない。
+    #   ★領域は TEST_TMP(上の mktemp -d)の配下ゆえ、teardown の既存の後始末に
+    #     含まれる。ここでは何も削除しない。
+    mkdir -p "${TEST_TMP}/tmux_none"
+    export TMUX_TMPDIR="${TEST_TMP}/tmux_none"
+    unset TMUX TMUX_PANE
+
     # デフォルトsettings（cliセクションなし = 後方互換テスト）
     cat > "${TEST_TMP}/settings_none.yaml" << 'YAML'
 language: ja
@@ -126,6 +145,54 @@ cli:
   default: kimi
 YAML
 
+    # find_agent_for_model T-1: 完全一致回帰 (sonnet 該当足軽あり・pane 不在=空き扱い → ashigaru2)
+    cat > "${TEST_TMP}/settings_tier_t1.yaml" << 'YAML'
+capability_tiers:
+  claude-sonnet-4-6:
+    max_bloom: 5
+  claude-opus-4-6:
+    max_bloom: 6
+cli:
+  default: claude
+  agents:
+    ashigaru1:
+      type: claude
+      model: claude-opus-4-6
+    ashigaru2:
+      type: claude
+      model: claude-sonnet-4-6
+YAML
+
+    # find_agent_for_model T-2: 上位tierフォールバック (sonnet 該当足軽なし・opus のみ存在 → ashigaru1)
+    cat > "${TEST_TMP}/settings_tier_t2.yaml" << 'YAML'
+capability_tiers:
+  claude-sonnet-4-6:
+    max_bloom: 5
+  claude-opus-4-6:
+    max_bloom: 6
+cli:
+  default: claude
+  agents:
+    ashigaru1:
+      type: claude
+      model: claude-opus-4-6
+YAML
+
+    # find_agent_for_model T-3: 下位tierフォールバック (sonnet/opus 該当足軽なし・haiku のみ存在 → SWITCH)
+    cat > "${TEST_TMP}/settings_tier_t3.yaml" << 'YAML'
+capability_tiers:
+  claude-sonnet-4-6:
+    max_bloom: 5
+  claude-haiku-4-5-20251001:
+    max_bloom: 2
+cli:
+  default: claude
+  agents:
+    ashigaru3:
+      type: claude
+      model: claude-haiku-4-5-20251001
+YAML
+
     # opencode settings
     cat > "${TEST_TMP}/settings_opencode.yaml" << 'YAML'
 cli:
@@ -157,6 +224,48 @@ cli:
       model: openrouter/minimax/minimax-m2.5
       variant: xhigh
 YAML
+
+    # Claude系全エージェント(shogun/karo/ashigaru1〜7)+ gunshi(非Claude・codex)
+    # cmd_759 redo1 G759-TEST-COVERAGE-05: --name付与の検査範囲を
+    # 「ashigaru1..7全て」という試験名の実態に一致させるためのfixture。
+    # gunshiは実運用でも非Claudeであり(config/settings.yaml参照)、
+    # ここでも意図して区別する(claude以外には--nameを付与しない設計を
+    # 併せて検証するため)。
+    cat > "${TEST_TMP}/settings_all_claude.yaml" << 'YAML'
+cli:
+  default: claude
+  agents:
+    shogun:
+      type: claude
+      model: opus
+    karo:
+      type: claude
+      model: opus
+    ashigaru1:
+      type: claude
+      model: sonnet
+    ashigaru2:
+      type: claude
+      model: sonnet
+    ashigaru3:
+      type: claude
+      model: sonnet
+    ashigaru4:
+      type: claude
+      model: sonnet
+    ashigaru5:
+      type: claude
+      model: sonnet
+    ashigaru6:
+      type: claude
+      model: sonnet
+    ashigaru7:
+      type: claude
+      model: sonnet
+    gunshi:
+      type: codex
+      model: gpt-5.6-sol
+YAML
 }
 
 # =============================================================================
@@ -173,13 +282,31 @@ YAML
     load_adapter_with "${TEST_TMP}/settings_opencode.yaml"
     [ "$(normalize_opencode_model gpt-5.4-mini)" = "openai/gpt-5.4-mini" ]
     [ "$(normalize_opencode_model gpt-5.3-codex-spark)" = "openai/gpt-5.3-codex-spark" ]
-    [ "$(normalize_opencode_model opus)" = "anthropic/claude-opus-4-6" ]
-    [ "$(normalize_opencode_model sonnet)" = "anthropic/claude-sonnet-4-6" ]
+    [ "$(normalize_opencode_model opus)" = "anthropic/claude-opus-5-5" ]
+    [ "$(normalize_opencode_model sonnet)" = "anthropic/claude-sonnet-5-5" ]
     [ "$(normalize_opencode_model haiku)" = "anthropic/claude-haiku-4-5-20251001" ]
     [ "$(normalize_opencode_model k2.5)" = "moonshot/kimi-k2.5" ]
     [ "$(normalize_opencode_model moonshot-k2.5)" = "moonshot/kimi-k2.5" ]
     [ "$(normalize_opencode_model kimi-k2.5)" = "moonshot/kimi-k2.5" ]
     [ "$(normalize_opencode_model kimi-k2-turbo)" = "moonshot/kimi-k2-turbo" ]
+}
+
+@test "normalize_opencode_model: cmd_783 新モデル(fable/opus-5.5/sonnet-5.5/gpt-6系)が正しく正規化される" {
+    load_adapter_with "${TEST_TMP}/settings_opencode.yaml"
+    [ "$(normalize_opencode_model fable)" = "anthropic/claude-fable-5-1" ]
+    [ "$(normalize_opencode_model claude-fable-5-1)" = "anthropic/claude-fable-5-1" ]
+    [ "$(normalize_opencode_model claude-opus-5-5)" = "anthropic/claude-opus-5-5" ]
+    [ "$(normalize_opencode_model claude-sonnet-5-5)" = "anthropic/claude-sonnet-5-5" ]
+    [ "$(normalize_opencode_model gpt-6-sol)" = "openai/gpt-6-sol" ]
+    [ "$(normalize_opencode_model gpt-6-luna)" = "openai/gpt-6-luna" ]
+    [ "$(normalize_opencode_model gpt-reserve)" = "openai/gpt-reserve" ]
+    # G783-02是正(cmd_783 Phase1 redo1): 別名opus/sonnetは5.5系へ移した。
+    # 明示ID claude-opus-4-6/claude-sonnet-4-6 は旧版互換として残し、
+    # 削除せずそれぞれの4.6系へ解決され続けることを併せて確認する。
+    [ "$(normalize_opencode_model opus)" = "anthropic/claude-opus-5-5" ]
+    [ "$(normalize_opencode_model sonnet)" = "anthropic/claude-sonnet-5-5" ]
+    [ "$(normalize_opencode_model claude-opus-4-6)" = "anthropic/claude-opus-4-6" ]
+    [ "$(normalize_opencode_model claude-sonnet-4-6)" = "anthropic/claude-sonnet-4-6" ]
 }
 
 @test "normalize_opencode_model: provider-qualified と未知モデルはそのまま" {
@@ -359,17 +486,39 @@ load_adapter_with() {
 # build_cli_command テスト
 # =============================================================================
 
-@test "build_cli_command: claude + model → claude --model opus --dangerously-skip-permissions" {
+@test "build_cli_command: claude + model → claude --model opus --name shogun --dangerously-skip-permissions" {
     load_adapter_with "${TEST_TMP}/settings_mixed.yaml"
     result=$(build_cli_command "shogun")
-    [ "$result" = "claude --model opus --dangerously-skip-permissions" ]
+    [ "$result" = "claude --model opus --name shogun --dangerously-skip-permissions" ]
 }
 
 @test "build_cli_command: PERMISSION_FLAG override → claude --permission-mode auto-approved" {
     PERMISSION_FLAG="--permission-mode auto-approved"
     load_adapter_with "${TEST_TMP}/settings_mixed.yaml"
     result=$(build_cli_command "shogun")
-    [ "$result" = "claude --model opus --permission-mode auto-approved" ]
+    [ "$result" = "claude --model opus --name shogun --permission-mode auto-approved" ]
+}
+
+@test "build_cli_command: claude --name値はagent_idとbyte一致する(shogun/karo/ashigaru1..7全て)" {
+    # cmd_759 redo1 G759-TEST-COVERAGE-05: 旧版はsettings_mixed.yamlを使い
+    # shogun/karo/ashigaru1-4の6値のみを検査しており、試験名の「ashigaru1..7
+    # 全て」と実態が食い違っていた。settings_all_claude.yaml(shogun/karo/
+    # ashigaru1〜7が全てclaude)へ切り替え、試験名どおりの範囲を検査する。
+    load_adapter_with "${TEST_TMP}/settings_all_claude.yaml"
+    for agent in shogun karo ashigaru1 ashigaru2 ashigaru3 ashigaru4 ashigaru5 ashigaru6 ashigaru7; do
+        result=$(build_cli_command "$agent")
+        [[ "$result" == *" --name ${agent} "* || "$result" == *" --name ${agent}" ]]
+    done
+}
+
+@test "build_cli_command: gunshi(非Claude・codex)には--nameを付与しない" {
+    # cmd_759 redo1 G759-TEST-COVERAGE-05: gunshiは実運用でも非Claude
+    # (config/settings.yaml参照)であり、Claude系全エージェント検査からは
+    # 意図して除外・区別する。build_cli_commandのclaude以外分岐には
+    # そもそも--nameの付与ロジックが無いことを明示的に固定する。
+    load_adapter_with "${TEST_TMP}/settings_all_claude.yaml"
+    result=$(build_cli_command "gunshi")
+    [[ "$result" != *"--name"* ]]
 }
 
 @test "build_cli_command: codex + default model → codex --model sonnet ..." {
@@ -929,7 +1078,7 @@ cli:
 YAML
     load_adapter_with "${TEST_TMP}/settings_thinking.yaml"
     result=$(build_cli_command "ashigaru1")
-    [ "$result" = "claude --model claude-sonnet-4-6 --dangerously-skip-permissions" ]
+    [ "$result" = "claude --model claude-sonnet-4-6 --name ashigaru1 --dangerously-skip-permissions" ]
 }
 
 @test "build_cli_command: thinking:false → MAX_THINKING_TOKENS=0 prefix" {
@@ -944,7 +1093,7 @@ cli:
 YAML
     load_adapter_with "${TEST_TMP}/settings_thinking.yaml"
     result=$(build_cli_command "ashigaru1")
-    [ "$result" = "MAX_THINKING_TOKENS=0 claude --model claude-sonnet-4-6 --dangerously-skip-permissions" ]
+    [ "$result" = "MAX_THINKING_TOKENS=0 claude --model claude-sonnet-4-6 --name ashigaru1 --dangerously-skip-permissions" ]
 }
 
 @test "build_cli_command: thinking未設定 → MAX_THINKING_TOKENS=0 なし (デフォルトThinking ON)" {
@@ -958,7 +1107,7 @@ cli:
 YAML
     load_adapter_with "${TEST_TMP}/settings_thinking.yaml"
     result=$(build_cli_command "ashigaru1")
-    [ "$result" = "claude --model claude-sonnet-4-6 --dangerously-skip-permissions" ]
+    [ "$result" = "claude --model claude-sonnet-4-6 --name ashigaru1 --dangerously-skip-permissions" ]
 }
 
 @test "build_cli_command: codex + thinking:false → MAX_THINKING_TOKENS=0 なし (Codexには無関係)" {
@@ -975,4 +1124,61 @@ YAML
     result=$(build_cli_command "ashigaru5")
     [[ "$result" != MAX_THINKING_TOKENS* ]]
     [[ "$result" == codex* ]]
+}
+
+# =============================================================================
+# find_agent_for_model テスト (T-1/T-2/T-3: tier-aware fallback f513fcc 復元)
+# =============================================================================
+# ★T-1〜T-3 は fixture が「該当 tier の足軽が居る/居ない」を作り、tier 選択(完全一致・
+#   上位tier・下位tier SWITCH)を検査する。setup が実 tmux から隔離されているため pane は
+#   引けず、候補は空き(pane 不在)扱いとなる。busy 判定経路は通らない(busy 判定そのものの
+#   検査は T-BUSY 群=test_send_wakeup.bats の責務)。
+
+@test "find_agent_for_model T-1: sonnet 該当足軽あり(実tmux非依存・pane不在=空き扱い) → 完全一致 ashigaru2 返却 (regression)" {
+    load_adapter_with "${TEST_TMP}/settings_tier_t1.yaml"
+    result=$(find_agent_for_model "claude-sonnet-4-6")
+    [ "$result" = "ashigaru2" ]
+}
+
+@test "find_agent_for_model T-2: sonnet 該当足軽なし(実tmux非依存)・opus のみ存在 → 上位tier ashigaru1 返却 (SWITCH不要)" {
+    load_adapter_with "${TEST_TMP}/settings_tier_t2.yaml"
+    result=$(find_agent_for_model "claude-sonnet-4-6")
+    [ "$result" = "ashigaru1" ]
+}
+
+@test "find_agent_for_model T-3: sonnet/opus 該当足軽なし(実tmux非依存)・haiku のみ存在 → SWITCH:ashigaru3:claude-sonnet-4-6" {
+    load_adapter_with "${TEST_TMP}/settings_tier_t3.yaml"
+    result=$(find_agent_for_model "claude-sonnet-4-6")
+    [ "$result" = "SWITCH:ashigaru3:claude-sonnet-4-6" ]
+}
+
+# ---------------------------------------------------------------------------
+# 実 tmux 隔離の固定 (cmd_791 A)
+# ---------------------------------------------------------------------------
+
+@test "find_agent_for_model 隔離: setup が実 tmux サーバ(稼働中の足軽pane)への到達を断っている" {
+    # 稼働中サーバのソケットが渡っておらず、既定ソケットの置場が試験専用領域であること
+    [ -z "${TMUX:-}" ]
+    [ -z "${TMUX_PANE:-}" ]
+    [ "$TMUX_TMPDIR" = "${TEST_TMP}/tmux_none" ]
+    # 実 tmux に届けば @agent_id 付き pane が返る。何も見えてはならない。
+    local visible
+    visible=$(tmux list-panes -a -F '#{@agent_id}' 2>/dev/null || true)
+    [ -z "$visible" ]
+}
+
+@test "find_agent_for_model 隔離: busy判定の実装が何を返しても T-3 の結果は変わらない(pane不在ゆえ busy判定経路を通らず、実paneのbusy/idleに依存しない)" {
+    load_adapter_with "${TEST_TMP}/settings_tier_t3.yaml"
+    local mode result
+    for mode in busy idle; do
+        # agent_is_busy_check を先に宣言しておけば find_agent_for_model は差し替えない。
+        # 隔離下では pane が引けず、この関数は呼ばれないことを結果の同一性で示す。
+        if [ "$mode" = "busy" ]; then
+            agent_is_busy_check() { return 0; }
+        else
+            agent_is_busy_check() { return 1; }
+        fi
+        result=$(find_agent_for_model "claude-sonnet-4-6")
+        [ "$result" = "SWITCH:ashigaru3:claude-sonnet-4-6" ]
+    done
 }

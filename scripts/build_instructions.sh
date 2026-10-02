@@ -85,6 +85,10 @@ EOFYAML
     cat "$PARTS_DIR/common/task_flow.md" >> "$output_path"
     echo "" >> "$output_path"
     cat "$PARTS_DIR/common/forbidden_actions.md" >> "$output_path"
+    echo "" >> "$output_path"
+    cat "$PARTS_DIR/common/parallelization_rules.md" >> "$output_path"
+    echo "" >> "$output_path"
+    cat "$PARTS_DIR/common/tooling_pitfalls.md" >> "$output_path"
 
     # Append CLI-specific tools section
     echo "" >> "$output_path"
@@ -164,7 +168,7 @@ generate_agents_md() {
         -e 's|CLAUDE\.md|AGENTS.md|g' \
         -e 's|CLAUDE\.local\.md|AGENTS.override.md|g' \
         -e 's|instructions/shogun\.md|instructions/generated/codex-shogun.md|g' \
-        -e 's|instructions/karo\.md|instructions/generated/codex-karo.md|g' \
+        -e 's|instructions/generated/karo\.md|instructions/generated/codex-karo.md|g' \
         -e 's|instructions/ashigaru\.md|instructions/generated/codex-ashigaru.md|g' \
         -e 's|instructions/gunshi\.md|instructions/generated/codex-gunshi.md|g' \
         -e 's|~/.claude/|~/.codex/|g' \
@@ -210,7 +214,7 @@ generate_copilot_instructions() {
         -e 's|CLAUDE\.md|copilot-instructions.md|g' \
         -e 's|CLAUDE\.local\.md|copilot-instructions.local.md|g' \
         -e 's|instructions/shogun\.md|instructions/generated/copilot-shogun.md|g' \
-        -e 's|instructions/karo\.md|instructions/generated/copilot-karo.md|g' \
+        -e 's|instructions/generated/karo\.md|instructions/generated/copilot-karo.md|g' \
         -e 's|instructions/ashigaru\.md|instructions/generated/copilot-ashigaru.md|g' \
         -e 's|instructions/gunshi\.md|instructions/generated/copilot-gunshi.md|g' \
         -e 's|~/.claude/|~/.copilot/|g' \
@@ -248,7 +252,7 @@ generate_kimi_instructions() {
         -e 's|CLAUDE\.md|agents/default/system.md|g' \
         -e 's|CLAUDE\.local\.md|agents/default/system.local.md|g' \
         -e 's|instructions/shogun\.md|instructions/generated/kimi-shogun.md|g' \
-        -e 's|instructions/karo\.md|instructions/generated/kimi-karo.md|g' \
+        -e 's|instructions/generated/karo\.md|instructions/generated/kimi-karo.md|g' \
         -e 's|instructions/ashigaru\.md|instructions/generated/kimi-ashigaru.md|g' \
         -e 's|instructions/gunshi\.md|instructions/generated/kimi-gunshi.md|g' \
         -e 's|~/.claude/|~/.kimi/|g' \
@@ -433,9 +437,17 @@ def normalize_opencode_model(model: str) -> str:
         return model
     if model in {"gpt-5.4-mini", "gpt-5.4", "gpt-5.3-codex", "gpt-5.3-codex-spark"} or model.startswith("gpt-5"):
         return f"openai/{model}"
-    if model in {"claude-opus-4-6", "opus"}:
+    if model in {"gpt-6-sol", "gpt-6-luna", "gpt-reserve"} or model.startswith("gpt-6"):
+        return f"openai/{model}"
+    if model in {"claude-fable-5-1", "fable"}:
+        return "anthropic/claude-fable-5-1"
+    if model in {"claude-opus-5-5", "opus"}:
+        return "anthropic/claude-opus-5-5"
+    if model == "claude-opus-4-6":
         return "anthropic/claude-opus-4-6"
-    if model in {"claude-sonnet-4-6", "sonnet"}:
+    if model in {"claude-sonnet-5-5", "sonnet"}:
+        return "anthropic/claude-sonnet-5-5"
+    if model == "claude-sonnet-4-6":
         return "anthropic/claude-sonnet-4-6"
     if model in {"claude-haiku-4-5-20251001", "haiku"}:
         return "anthropic/claude-haiku-4-5-20251001"
@@ -530,6 +542,10 @@ EOF
             cat "$PARTS_DIR/common/task_flow.md"
             echo ""
             cat "$PARTS_DIR/common/forbidden_actions.md"
+            echo ""
+            cat "$PARTS_DIR/common/parallelization_rules.md"
+            echo ""
+            cat "$PARTS_DIR/common/tooling_pitfalls.md"
 
             # Append OpenCode-specific tools section
             echo ""

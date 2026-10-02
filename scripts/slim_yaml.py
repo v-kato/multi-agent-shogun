@@ -19,10 +19,14 @@ CANONICAL_TASKS = {f'ashigaru{i}' for i in range(1, 9)} | {'gunshi'}
 CANONICAL_REPORTS = {f'ashigaru{i}_report' for i in range(1, 9)} | {'gunshi_report'}
 IDLE_STUB = {'task': {'status': 'idle'}}
 TOP_LEVEL_IDLE_STUB = {'status': 'idle'}
-TERMINAL_STATUSES = {'done', 'cancelled', 'paused'}
-ACTIVE_STATUSES = {'pending', 'in_progress', 'blocked'}
+TERMINAL_STATUSES = {'done', 'cancelled'}
+ACTIVE_STATUSES = {'pending', 'in_progress', 'blocked', 'paused'}
 TASK_ACTIVE_STATUSES = {'idle', 'assigned', 'pending_blocked'}
 INVENTORY_AGE_SECONDS = 30 * 86400
+
+
+class QueueLoadError(Exception):
+    """shogun_to_karo.yaml の読込・parseに失敗した場合に送出する(fail-closed用)。"""
 
 
 def load_yaml(filepath):
@@ -104,13 +108,42 @@ def print_inventory(message):
 
 
 def get_active_cmd_ids():
-    """Return command IDs in shogun_to_karo that are not terminal."""
+    """Return cmd_id values in shogun_to_karo that are not terminal.
+
+    shogun_to_karo.yaml の読込・parseに失敗した場合は QueueLoadError を
+    送出する。呼び出し元(slim_reports)はこれを検知してarchive操作なしで
+    fail-closed停止すること。「読込に失敗」には、YAML構文破損だけでなく
+    ファイル自体が存在しない(FileNotFoundError)場合や、権限不足等その他
+    のOSError全般も含む(cmd_745 redo1 D-01)。ファイル不存在は「アクティブ
+    なcmdが0件」なのか「queueが読めず判別不能」なのかを区別できないため、
+    安全側に倒してfail-closedとして扱う。stale reportを誤ってarchiveする
+    (Dが本来防ごうとしたのと同じ事故)よりは、archiveを止めて人間の確認を
+    待つ方が安全である。
+    """
     queue_dir = get_queue_dir()
     shogun_file = queue_dir / 'shogun_to_karo.yaml'
-    data = load_yaml(shogun_file)
 
-    key = 'commands' if 'commands' in data else 'queue'
-    commands = data.get(key, []) if isinstance(data, dict) else []
+    try:
+        with open(shogun_file, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f)
+    except OSError as e:
+        raise QueueLoadError(f"{shogun_file} の読込に失敗: {e}") from e
+    except yaml.YAMLError as e:
+        raise QueueLoadError(f"{shogun_file} の読込・parseに失敗: {e}") from e
+
+    if data is None:
+        data = []
+
+    # 実運用のcanonical queueはトップレベルが素のlist(cmd_id等を持つ辞書の列)。
+    # {commands:[...]} / {queue:[...]} のdict包装形式にも後方互換で対応する。
+    if isinstance(data, list):
+        commands = data
+    elif isinstance(data, dict):
+        key = 'commands' if 'commands' in data else 'queue'
+        commands = data.get(key, [])
+    else:
+        commands = []
+
     if not isinstance(commands, list):
         return set()
 
@@ -118,11 +151,11 @@ def get_active_cmd_ids():
     for cmd in commands:
         if not isinstance(cmd, dict):
             continue
-        if cmd.get('id') is None:
+        if cmd.get('cmd_id') is None:
             continue
         if get_item_status(cmd) in TERMINAL_STATUSES:
             continue
-        active.add(cmd.get('id'))
+        active.add(cmd.get('cmd_id'))
     return active
 
 
@@ -133,7 +166,7 @@ def inventory_commands(commands):
         if not isinstance(cmd, dict):
             continue
         status = get_item_status(cmd) or 'unknown'
-        cmd_id = cmd.get('id', '<missing-id>')
+        cmd_id = cmd.get('cmd_id', '<missing-cmd-id>')
         if status not in TERMINAL_STATUSES and status not in ACTIVE_STATUSES:
             unknown.append(f"{cmd_id}:{status}")
         if status in ACTIVE_STATUSES and is_old_timestamp(cmd.get('timestamp')):
@@ -263,11 +296,28 @@ def slim_reports(dry_run=False):
     if not reports_dir.exists():
         return True
 
-    active_cmd_ids = get_active_cmd_ids()
+    try:
+        active_cmd_ids = get_active_cmd_ids()
+    except QueueLoadError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print(
+            "[FAIL-CLOSED] shogun_to_karo.yaml の読込・parseに失敗したため、"
+            "report slimmingを中断します(archiveは一切行いません)",
+            file=sys.stderr,
+        )
+        return False
+
+    # CANONICAL_REPORTS(静的定義)に加え、reports_dir配下の *_archive.yaml
+    # stemを動的に除外対象へ含める。karo_slim.py のモンキーパッチ
+    # (CANONICAL_REPORTSへの実行時追加)が無くても、slim_yaml.py 単体実行で
+    # 同じ保護が効くようにするため(冪等: 既にパッチ済みでも和集合なので害はない)。
+    archive_stems = {p.stem for p in reports_dir.glob('*_archive.yaml')}
+    canonical_reports = CANONICAL_REPORTS | archive_stems
+
     timestamp = get_timestamp()
 
     for filepath in sorted(reports_dir.glob('*.yaml')):
-        if filepath.stem in CANONICAL_REPORTS:
+        if filepath.stem in canonical_reports:
             continue
 
         data = load_yaml(filepath)

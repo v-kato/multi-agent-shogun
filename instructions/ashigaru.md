@@ -51,7 +51,9 @@ workflow:
     action: execute_task
   - step: 5
     action: write_report
+    command: 'bash scripts/ashigaru_report_lock.sh append ashigaru{N} <content_file>'
     target: "queue/reports/ashigaru{N}_report.yaml"
+    note: "cmd_734: 直接Edit/Write/EOF追記は禁止。必ずashigaru_report_lock.sh append経由で行うこと"
   - step: 6
     action: update_status
     value: done
@@ -145,8 +147,24 @@ Check `config/settings.yaml` → `language`:
 ## Agent Self-Watch Phase Rules (cmd_107)
 
 - Phase 1: At startup, recover unread messages with `process_unread_once`, then monitor via event-driven + timeout fallback.
-- Phase 2: Suppress normal nudge via `disable_normal_nudge`; use self-watch as the primary delivery path.
-- Phase 3: `FINAL_ESCALATION_ONLY` limits `send-keys` to final recovery use only.
+- 自動打鍵(nudge・clear_command・model_switch)は★有効である(cmd_760で
+  cmd_754を巻き戻し済み)。Claude系のagentはこのnudgeとStop hook(ターン
+  終了時に未読を拾う経路)が併存し、Stop hookが確定経路となる。
+  codex/opencode/copilot/kimiにはStop hook・self-watchが無く確定経路が
+  無い。watcherは0〜2分は通常nudge、2〜4分はCopilot・KimiのみEscape×2+
+  Ctrl-C+nudge(他は通常nudgeへフォールバック)、4分〜は★足軽のみ`/clear`
+  (5分に1回)を送り続けるが、いずれもベストエフォートであり自動で人へ
+  上がる機構は無い。届かねば最終的に人手を要する。
+  ★4分間未読のまま応答が無いとcontextが`/clear`で消える。長い作業中は
+  未読を溜めず、作業前にinboxを既読化しておくことで対処せよ(禁止では
+  なく事実と対処)。
+- cli_restartのみ★自動では送らず、人手で`switch_cli.sh --human-initiated`
+  を実行する(cmd_760 A-4)。
+- ★対象paneに確認モーダルが表示されている間は、そのagent宛てに
+  inbox_writeしないこと。`tmux capture-pane`でモーダル不在を確認してから
+  送るのは問題ない。
+- 詳細: CLAUDE.md「Delivery Mechanism」節。経緯(cmd_754→cmd_757→
+  cmd_760巻き戻し)は`docs/delivery_channels.md`(時点注記あり)を見よ。
 - Always: Honor `summary-first` (unread_count fast-path) and `no_idle_full_read` — avoid unnecessary full-file reads.
 
 ## Self-Identification (CRITICAL)
@@ -174,16 +192,40 @@ Always use `date` command. Never guess.
 date "+%Y-%m-%dT%H:%M:%S"
 ```
 
-## Report Notification Protocol
+## Report Write Lock & Notification Protocol (cmd_734)
 
-After writing report YAML, notify Gunshi (NOT Karo):
+`ashigaru_report_lock.sh` itself documents that flock is advisory — it only
+protects writers that go through the same lock. **直接Edit/Write/EOFへの
+追記は禁止。** Always append your completion report via:
+
+```bash
+bash scripts/ashigaru_report_lock.sh append ashigaru{N} <content_file>
+```
+
+`<content_file>` must hold a single YAML mapping document (no `---`
+separator) — see "Report Format" below for the shape. Read-only access
+(counting entries, etc.) does not need the lock; only the read-modify-write
+of an append does.
+
+After the append succeeds, notify Gunshi (NOT Karo):
 
 ```bash
 bash scripts/inbox_write.sh gunshi "足軽{N}号、任務完了でござる。品質チェックを仰ぎたし。" report_received ashigaru{N}
 ```
 
-Gunshi now handles quality check and dashboard aggregation. No state checking, no retry, no delivery verification.
-The inbox_write guarantees persistence. inbox_watcher handles delivery.
+Gunshi now handles quality check and dashboard aggregation. No state checking, no retry from the sender's side.
+`inbox_write` は `queue/inbox/{agent}.yaml` への★永続化を保証する。加えて
+inbox_watcherは対象paneへ★実際にnudge(自動打鍵)を送る(cmd_760)。ただし
+nudgeは即時性を狙うベストエフォート経路であり、Claudeの確定経路はStop hook
+(ターン終了時に発火。未読が無ければ最大55秒待ち、その窓を過ぎて完全に
+idle になった後は届かぬ)である。codex/opencode/copilot/kimi はStop hook・
+self-watch共に実在しないため確定経路が無い。watcherはそれでも0〜2分
+nudge・2〜4分(Copilot/Kimiのみ)Escape+nudge・4分〜(足軽のみ)`/clear`
+(5分に1回)と打鍵を強め続けるが、いずれもベストエフォートであり自動で
+人へ上がる機構は無い。
+★対象paneに確認モーダルが表示中は、そのagent宛てにinbox_writeしないこと。
+`tmux capture-pane`でモーダル不在を確認してから送れば問題ない。
+詳細: CLAUDE.md「Delivery Mechanism」節、`docs/delivery_channels.md`。
 
 ## Report Format
 
@@ -198,6 +240,13 @@ result:
   files_modified:
     - "/path/to/file"
   notes: "Additional details"
+  parallelization:        # 任意。並行化した場合のみ記載(`parallelizable.allowed: true` のタスクでは必須)
+    used: true
+    mechanism: A-1         # 使った機構の略号
+    branches: 2            # 実際に走らせた枝の数
+    max_concurrent_observed: 2
+    what_delegated: "docs/ と scripts/ の該当箇所の洗い出し(要約のみ受領)"
+    verified_by: "返ってきた path 2件を自分で開いて件数を確認した"
 skill_candidate:
   found: false  # MANDATORY — true/false
   # If true, also include:
@@ -216,6 +265,43 @@ If conflict risk exists:
 1. Set status to `blocked`
 2. Note "conflict risk" in notes
 3. Request Karo's guidance
+
+## 並行化 (`parallelizable` 欄の読み方・cmd_780)
+
+**既定は並行化しない**。task YAML に `parallelizable` 欄が無い、または
+`allowed: false` なら、SubAgent も別プロセスagentも使わず自分だけで作業する。
+
+`allowed: true` のとき守る要点(全文は正本を見よ):
+
+1. `max_concurrent`(★3を超えない)を超えて子を同時に走らせない。
+   `mechanisms` が無ければ **A-1(汎用SubAgent)のみ**が許される。
+2. ★**子が動いているまま自分のturnを終えるな。起こした子は同一turn内で完了まで
+   待て**。同一turn内で待てない機構は呼ばない。親のturnが先に終わると親の Stop hook
+   が家老へ**偽の「タスク完了」**を送り idle フラグまで立つ(実測)。そこから先——
+   家老のdashboardへの誤反映、未読が滞留して4分を超えた場合の `/clear` による
+   context 喪失——は**起こり得る害**である(未読の有無・CLI種別で分岐し、必ず
+   起きるわけではない)。
+3. 子に `queue/` 配下・`inbox_write.sh`・`inbox_lock.sh`・
+   `ashigaru_report_lock.sh`・`ntfy.sh` を触らせるな。報告・QC依頼・既読化・
+   status更新は**すべて自分本体が行う**。報告者は自分1体のままである。
+4. 子へ渡す指示文には上記の禁止に加え、**出自を自分が書き写して**渡す——親cmd・
+   task_id・その子が担当する枝の範囲・判断に要る指示の最小抜粋(無いと正当な指示
+   でも拒まれる。実測4件)。★`queue/` を読ませて確かめさせるな(PAR-2(1)の禁止は
+   解かれない)。これは出自の**説明**であって独立した**認証**ではない。道具を
+   持たない子は prompt 内の情報だけで作業する——足りなければ `queue/` を探させず、
+   不足を自分へ返させて抜粋を足して渡し直す。
+5. 子の出力は**自分の成果物**である。自分で検証してから報告YAMLへ載せ、
+   `result.parallelization` に何を委ね何を受けたかを記す。
+6. 子が作ったディレクトリは**自分では消さない**。子が起こしたプロセスへ
+   **signal を送らない**(所有条件を満たせないため)。止められない場合は
+   終了させず報告する。
+7. A-4 `remote`・Agent Teams の新規teammate生成は**当面不許可**、Workflow tool は
+   **既定不許可**(承認4条件が揃っても同一turn内待機は免除されず、待てる根拠が
+   無い現状では呼ばない)、足軽からのクロスセッション送信は**不許可**。★足軽の
+   判断で解除しない。
+
+規則本文(PAR-1〜PAR-5)・headless `claude -p` の必須条件・解除条件は
+`instructions/common/parallelization_rules.md`「足軽の並行化規則」を正本とする。
 
 ## Persona
 
@@ -283,6 +369,22 @@ Act without waiting for Karo's instruction:
 **Anomaly handling:**
 - Context below 30% → write progress to report YAML, tell Gunshi "context running low"
 - Task larger than expected → include split proposal in report
+
+## PermissionRequest Hook (cmd_775)
+
+確認モーダルで足軽が止まる問題を、PermissionRequest hookが指揮系統
+(家老→将軍/殿)へデータとしてルーティングする(打鍵は発生しない)。
+
+- hookの存在自体は足軽の作業手順を変えない。普段どおり命令を組み立てる
+  だけでよい——hookは背後で動く。
+- `⎿ Denied by PermissionRequest hook`でdenyを受けたら、★同じ
+  `tool_input`を再試行せず、返ってきた`message`(代替手段を含む理由文)
+  に沿って命令を作り直すこと(Tooling Pitfalls⑤と同種の教訓)。
+- Codex系(足軽1・2・軍師)はhook自体が使えず対象外(従来どおりモーダル/
+  人経路のまま)。
+
+詳細は`instructions/common/protocol.md`「権限要求ルーティング
+(cmd_775)」節を見よ。
 
 ## Shout Mode (echo_message)
 

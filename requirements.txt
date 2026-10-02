@@ -1,1 +1,4 @@
 pyyaml>=6.0
+google-cloud-pubsub
+google-auth
+google-api-python-client

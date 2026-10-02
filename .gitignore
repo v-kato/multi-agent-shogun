@@ -25,6 +25,10 @@
 !.claude/
 !.claude/settings.json
 
+# Codex CLI settings (cmd_757④redo1, 2026-09-09: hooks.jsonは個人環境の絶対パスを含むため生成物として除外し、テンプレートのみ追跡する)
+!.codex/
+!.codex/hooks.json.template
+
 # Instructions (core OSS)
 !instructions/
 !instructions/shogun.md
@@ -56,6 +60,13 @@
 !lib/ntfy_auth.sh
 !lib/agent_status.sh
 !lib/agent_registry.sh
+!lib/pane_preflight.sh
+# cmd_757②: /clear の三重条件つき限定送信 gate
+!lib/clear_send_gate.sh
+# cmd_759: 出陣後のmesh登録(socket実在)をread-onlyで確認する
+!lib/mesh_registration_check.sh
+# cmd_785: 出陣やり直し時の Claude 会話 resume(撤収直前の採取と照合・opt-in)
+!lib/claude_session_resume.sh
 
 # Multi-CLI: Codex auto-load file
 !AGENTS.md
@@ -108,10 +119,27 @@
 !scripts/seo_qc.sh
 !scripts/stop_hook_inbox.sh
 !scripts/session_start_hook.sh
+# cmd_757②: gate 経由の context reset 送信(唯一の入口)
+!scripts/send_clear_gated.sh
+!scripts/codex_session_start_hook.sh
+!scripts/generate_codex_hooks.sh
 !scripts/agent_status.sh
 !scripts/ratelimit_check.sh
 !scripts/switch_cli.sh
 !scripts/dashboard-viewer.py
+!scripts/gunshi_report_lock.sh
+!scripts/inbox_lock.sh
+!scripts/ashigaru_report_lock.sh
+!scripts/count_by_dir.sh
+!scripts/shogun_to_karo_lock.sh
+!scripts/rm_rf_d002e1_checker.py
+!scripts/isolated_tmux.sh
+# cmd_775: PermissionRequest hook 本体(権限要求ルーティング)
+!scripts/permission_request_hook.sh
+!scripts/permission_decide.sh
+# cmd_788: 公開リポジトリ向け禁則語走査と、新規ファイルの追跡確認(読取専用の gate 道具)
+!scripts/public_repo_scan.sh
+!scripts/check_tracked.sh
 
 
 # SayTask (sample template only, not actual data)
@@ -129,6 +157,12 @@ logs/
 !docs/
 !docs/philosophy.md
 !docs/vps_pr118_verification_plan.md
+# cmd_754: 配送経路の正本(E-4)。★whitelist方式ゆえ明示せねば追跡されぬ
+!docs/delivery_channels.md
+# cmd_757④redo1: Codex hook有効化手順(問題2是正)
+!docs/codex_hook_activation.md
+# cmd_785: 出陣やり直し時の Claude 会話 resume の運用説明
+!docs/claude_session_resume.md
 
 # Screenshots (masked — no secrets)
 !images/
@@ -183,6 +217,9 @@ tests/specs/osato_lms_*
 !tests/*.sh
 !tests/fixtures/
 !tests/fixtures/*.yaml
+!tests/fixtures/*.ps1
+# cmd_757② redo2: 負の静的試験 T-CG-066 が読む禁止文言の台帳
+!tests/fixtures/cmd_757_redo2_banned_phrases.txt
 !tests/unit/
 !tests/unit/*.bats
 !tests/integration/
@@ -198,6 +235,10 @@ tests/specs/osato_lms_*
 !tests/e2e/mock_behaviors/*.sh
 !tests/test_helper/
 !tests/test_helper/README.md
+# 外部プロジェクト専用の試験・fixture は OSS 非対象(privategit 側で保全)。★許可行より後ろに置くこと(後勝ち)
+tests/fixtures/cmd_718_step0_canonical.ps1
+tests/unit/test_cmd_712_launch_helpers_matrix.bats
+tests/unit/test_cmd_719_ps1_bom_guard.bats
 
 # CI/CD
 !.github/

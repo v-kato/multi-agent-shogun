@@ -483,8 +483,12 @@ PYEOF
 }
 
 @test "codex-clear: codex-ashigaru.md protocol uses CLI-neutral context reset" {
-    # protocol.mdのclear_command行がCLI中立表現になっていること
-    grep -q "context reset command via send-keys" "$OUTPUT_DIR/codex-ashigaru.md"
+    # ★cmd_754: clear_command は自動では送らなくなった。protocol.md の記述が
+    #   CLI 中立(特定CLIの打鍵を指示しない)であることを検査する。
+    grep -q "自動では送らない" "$OUTPUT_DIR/codex-ashigaru.md"
+    # 「send-keys で context reset を送る」という旧記述が残っていないこと
+    run bash -c "grep -c 'context reset command via send-keys' '$OUTPUT_DIR/codex-ashigaru.md' || true"
+    [ "$output" = "0" ]
 }
 
 @test "codex-clear: codex-karo.md has no bare '/clear' in redo protocol" {
@@ -494,11 +498,138 @@ PYEOF
 }
 
 @test "codex-clear: codex-gunshi.md protocol uses CLI-neutral context reset" {
-    grep -q "context reset command via send-keys" "$OUTPUT_DIR/codex-gunshi.md"
+    # ★cmd_754: clear_command は自動では送らなくなった。protocol.md の記述が
+    #   CLI 中立(特定CLIの打鍵を指示しない)であることを検査する。
+    grep -q "自動では送らない" "$OUTPUT_DIR/codex-gunshi.md"
+    # 「send-keys で context reset を送る」という旧記述が残っていないこと
+    run bash -c "grep -c 'context reset command via send-keys' '$OUTPUT_DIR/codex-gunshi.md' || true"
+    [ "$output" = "0" ]
 }
 
 @test "codex-clear: codex-shogun.md protocol uses CLI-neutral context reset" {
-    grep -q "context reset command via send-keys" "$OUTPUT_DIR/codex-shogun.md"
+    # ★cmd_754: clear_command は自動では送らなくなった。protocol.md の記述が
+    #   CLI 中立(特定CLIの打鍵を指示しない)であることを検査する。
+    grep -q "自動では送らない" "$OUTPUT_DIR/codex-shogun.md"
+    # 「send-keys で context reset を送る」という旧記述が残っていないこと
+    run bash -c "grep -c 'context reset command via send-keys' '$OUTPUT_DIR/codex-shogun.md' || true"
+    [ "$output" = "0" ]
+}
+
+# =============================================================================
+# Ashigaru Report Write Lock (cmd_734 redo1)
+# =============================================================================
+# G734-C-01: 足軽report追記(queue/reports/ashigaru{N}_report.yaml)がロック
+# 経由に限定されず、report.yaml EOFへの直接追記が指示され得た欠陥の回帰
+# テスト。ソース(instructions/ashigaru.md)と、共通protocol.md経由で全CLI
+# 変種の生成物に反映されることの両方を検証する。
+#
+# 注記: instructions/{shogun,karo,gunshi,ashigaru}.md はCRLFを含み、
+# build_instruction_file() のfrontmatter抽出(awk '/^---$/')が空振りする
+# 既知の別問題があるため、ashigaru.mdのworkflow step 5そのものは生成物へ
+# 伝播しない。そのためスクリプト呼出しの検証は、CRLFの影響を受けない
+# instructions/common/protocol.md経由の伝播で行う(instructions/ashigaru.md
+# 自体はソース直読み〈CLAUDE.md Session Start手順〉のため別途ソース単体で検証する)。
+
+@test "report-lock: source instructions/ashigaru.md workflow step 5 references ashigaru_report_lock.sh" {
+    grep -q "ashigaru_report_lock.sh append ashigaru{N}" "$PROJECT_ROOT/instructions/ashigaru.md"
+}
+
+@test "report-lock: source instructions/ashigaru.md forbids direct EOF append" {
+    grep -q "Edit/Write/EOF" "$PROJECT_ROOT/instructions/ashigaru.md"
+}
+
+@test "report-lock: common/protocol.md documents ashigaru_report_lock.sh append/archive" {
+    grep -q "bash scripts/ashigaru_report_lock.sh append <agent_id>" "$PROJECT_ROOT/instructions/common/protocol.md"
+    grep -q "bash scripts/ashigaru_report_lock.sh archive <agent_id>" "$PROJECT_ROOT/instructions/common/protocol.md"
+    grep -q "report.yamlのEOFへの直接Edit/Write追記は禁止" "$PROJECT_ROOT/instructions/common/protocol.md"
+}
+
+@test "report-lock: generated ashigaru.md (claude) references ashigaru_report_lock.sh append" {
+    grep -q "ashigaru_report_lock.sh append" "$OUTPUT_DIR/ashigaru.md"
+}
+
+@test "report-lock: generated codex-ashigaru.md references ashigaru_report_lock.sh append" {
+    grep -q "ashigaru_report_lock.sh append" "$OUTPUT_DIR/codex-ashigaru.md"
+}
+
+@test "report-lock: generated copilot-ashigaru.md references ashigaru_report_lock.sh append" {
+    grep -q "ashigaru_report_lock.sh append" "$OUTPUT_DIR/copilot-ashigaru.md"
+}
+
+@test "report-lock: generated kimi-ashigaru.md references ashigaru_report_lock.sh append" {
+    grep -q "ashigaru_report_lock.sh append" "$OUTPUT_DIR/kimi-ashigaru.md"
+}
+
+@test "report-lock: generated opencode-ashigaru.md references ashigaru_report_lock.sh append" {
+    grep -q "ashigaru_report_lock.sh append" "$OUTPUT_DIR/opencode-ashigaru.md"
+}
+
+@test "report-lock: generated ashigaru variants forbid direct EOF append" {
+    local file
+    for file in "$OUTPUT_DIR/ashigaru.md" "$OUTPUT_DIR/codex-ashigaru.md" \
+                "$OUTPUT_DIR/copilot-ashigaru.md" "$OUTPUT_DIR/kimi-ashigaru.md" \
+                "$OUTPUT_DIR/opencode-ashigaru.md"; do
+        grep -q "直接Edit/Write追記は禁止" "$file" || {
+            echo "missing prohibition text in $file" >&2
+            return 1
+        }
+    done
+}
+
+# =============================================================================
+# Karo Task-Authoring Rule for Ashigaru Report Lock (cmd_734 redo2)
+# =============================================================================
+# G734-C-01-R1: 家老のtask YAML作成手順(instructions/roles/karo_role.md)へ、
+# 全ashigaru taskの完了報告節がashigaru_report_lock.sh append経由の追記を
+# 指示し、report.yamlへの直接Edit/Write/heredoc追記を禁止する規則が存在
+# することの回帰テスト。karo_role.mdはrole body(instructions/roles/
+# ${role}_role.md)としてbuild_instruction_file()内でcatにより無条件に
+# 結合される(frontmatter抽出のCRLF既知問題[G734-FOLLOWUP-CRLF-01]の
+# 影響を受けない経路)。そのため生成物5変種+.opencode/agents/karo.mdの
+# 全てで直接検証できる。
+
+@test "karo-report-lock: source instructions/roles/karo_role.md documents append rule" {
+    grep -q "ashigaru_report_lock.sh append ashigaru{N}" "$PROJECT_ROOT/instructions/roles/karo_role.md"
+}
+
+@test "karo-report-lock: source instructions/roles/karo_role.md forbids direct EOF append instruction" {
+    grep -q "直接 Edit/Write/heredoc" "$PROJECT_ROOT/instructions/roles/karo_role.md"
+}
+
+@test "karo-report-lock: generated karo.md (claude) references task-authoring append rule" {
+    grep -q "Ashigaru完了報告節の記述規則" "$OUTPUT_DIR/karo.md"
+}
+
+@test "karo-report-lock: generated codex-karo.md references task-authoring append rule" {
+    grep -q "Ashigaru完了報告節の記述規則" "$OUTPUT_DIR/codex-karo.md"
+}
+
+@test "karo-report-lock: generated copilot-karo.md references task-authoring append rule" {
+    grep -q "Ashigaru完了報告節の記述規則" "$OUTPUT_DIR/copilot-karo.md"
+}
+
+@test "karo-report-lock: generated kimi-karo.md references task-authoring append rule" {
+    grep -q "Ashigaru完了報告節の記述規則" "$OUTPUT_DIR/kimi-karo.md"
+}
+
+@test "karo-report-lock: generated opencode-karo.md references task-authoring append rule" {
+    grep -q "Ashigaru完了報告節の記述規則" "$OUTPUT_DIR/opencode-karo.md"
+}
+
+@test "karo-report-lock: .opencode/agents/karo.md references task-authoring append rule [R6]" {
+    grep -q "Ashigaru完了報告節の記述規則" "$PROJECT_ROOT/.opencode/agents/karo.md"
+}
+
+@test "karo-report-lock: generated karo variants forbid direct EOF append instruction" {
+    local file
+    for file in "$OUTPUT_DIR/karo.md" "$OUTPUT_DIR/codex-karo.md" \
+                "$OUTPUT_DIR/copilot-karo.md" "$OUTPUT_DIR/kimi-karo.md" \
+                "$OUTPUT_DIR/opencode-karo.md" "$PROJECT_ROOT/.opencode/agents/karo.md"; do
+        grep -q "直接 Edit/Write/heredoc" "$file" || {
+            echo "missing prohibition text in $file" >&2
+            return 1
+        }
+    done
 }
 
 # =============================================================================
@@ -517,4 +648,45 @@ PYEOF
     checksums_second=$(find "$OUTPUT_DIR" -name "*.md" -type f -exec md5sum {} \; | sort)
 
     [ "$checksums_first" = "$checksums_second" ]
+}
+
+# =============================================================================
+# Ashigaru Report Lock Allowlist ashigaru1〜7 (cmd_734 redo1 — G734-DOC-01)
+# =============================================================================
+# 軍師QC(subtask_734_report_format_migration_gap_qc)がblocking指摘した
+# 不整合の回帰テスト: 実装(ashigaru_report_lock.shの_ALLOWLIST)は既に
+# ashigaru1〜7を受理するが、instructions/common/protocol.md:376は
+# 「ashigaru3〜7のみ受理」と誤記したままgenerated全変種へ伝播していた。
+# sourceと全generated変種がashigaru1・ashigaru2を含むことを検証する。
+
+@test "report-lock-allowlist: source common/protocol.md documents ashigaru1/ashigaru2 in allowlist" {
+    grep -q '`ashigaru1`/`ashigaru2`/`ashigaru3`' "$PROJECT_ROOT/instructions/common/protocol.md"
+}
+
+@test "report-lock-allowlist: source common/protocol.md no longer opens the allowlist at ashigaru3" {
+    # 是正前は「は `ashigaru3`/`ashigaru4`/...」の並びでashigaru3始まりだった。
+    # 是正後はashigaru1始まりになるため、この開始位置パターンは消えているはず。
+    run grep -c 'は `ashigaru3`/`ashigaru4`/`ashigaru5`/`ashigaru6`/`ashigaru7`' "$PROJECT_ROOT/instructions/common/protocol.md"
+    [ "$output" = "0" ]
+}
+
+@test "report-lock-allowlist: all instructions/generated/*.md variants document ashigaru1/ashigaru2" {
+    local file
+    for file in "$OUTPUT_DIR"/*.md; do
+        grep -q '`ashigaru1`/`ashigaru2`/`ashigaru3`' "$file" || {
+            echo "missing ashigaru1/ashigaru2 allowlist text in $file" >&2
+            return 1
+        }
+    done
+}
+
+@test "report-lock-allowlist: .opencode/agents/*.md (non-runtime) variants document ashigaru1/ashigaru2" {
+    local file
+    for file in "$PROJECT_ROOT"/.opencode/agents/*.md; do
+        [[ "$file" == *-runtime.md ]] && continue
+        grep -q '`ashigaru1`/`ashigaru2`/`ashigaru3`' "$file" || {
+            echo "missing ashigaru1/ashigaru2 allowlist text in $file" >&2
+            return 1
+        }
+    done
 }

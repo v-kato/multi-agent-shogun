@@ -156,7 +156,7 @@ Copilot CLI uses auto-compaction at 95% token limit. No `/clear` equivalent exis
 
 For the 将軍 system, if Copilot CLI is integrated:
 1. Auto-compaction handles most cases automatically
-2. `/compact` can be sent via send-keys if tmux integration works
+2. `/compact` はinbox_watcherの自動送信対象(clear_command/model_switch)に含まれない。必要なら人が当該 pane へ手動で入力する
 3. Session state preserved through compaction (unlike `/clear` which resets)
 4. CLAUDE.md-based recovery not needed if context is preserved; use `AGENTS.md` + `.github/copilot-instructions.md` instead
 

@@ -141,7 +141,10 @@ EOF
 #
 # For Claude CLI: creates the idle flag file to simulate Claude Code's Stop hook.
 # inbox_watcher uses flag-file-based busy detection for Claude; without this,
-# the watcher always sees the mock as "busy" and never sends nudges.
+# the watcher always sees the mock as "busy".
+# ★cmd_754 E-1 以降、busy 判定の帰結は「nudge を送るか」ではない。watcher は
+#   打鍵を一つも持たぬ。判定が効くのは「Stop hook に委ねてよいか」「滞留時計を
+#   進めるか」であり、誤 busy のままでは滞留が人経路へ上がらぬ。
 show_prompt() {
     local cli_type="${1:-claude}"
     # Simulate Stop hook: create idle flag when Claude mock becomes idle

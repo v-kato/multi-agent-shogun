@@ -19,6 +19,13 @@
 #   2〜4分: Copilot/Kimi は Escape×2 + Ctrl-C + nudge。
 #            Claude/Codex/OpenCode は通常nudgeへフォールバック
 #   4分〜 : /clear送信（5分に1回まで。強制リセット+YAML再読）
+#
+# clear_command の未読保持（cmd_792②・実効CLIがcodex/opencodeの場合のみ）:
+#   抽出時に既読化せず、busy/permission保留・送信失敗では read:false のまま次巡回へ
+#   持ち越す。reset（Codexは起動プロンプトまで）が完了したIDだけを既読化する。
+#   Codexで /new 送信後に起動プロンプトがbusyなら強行せず、同IDを保持して
+#   次巡回で起動プロンプトのみ再判定する（/new は再送しない）。
+#   Claude /clear・足軽4分エスカレーション・model_switch・cli_restart は従来どおり。
 # ═══════════════════════════════════════════════════════════════
 
 # ─── Testing guard ───
@@ -134,6 +141,77 @@ reset_nudge_throttle() {
     LAST_NUDGE_COUNT=""
 }
 
+# ─── Permission-request delivery guard (cmd_775 Phase C/D, 将軍裁定(c)(ii)) ───
+# hookがdecision待ちの間、確認モーダルが画面に出たままになる(Phase 0隔離
+# PoC③で実測済み)。この間にnudge・/clear・model_switchの打鍵が届くと
+# 2026-09-08型の誤爆(打鍵のEnterがモーダルの既定選択肢を押す事故)が
+# 再発し得るため、当該agentの未決permission_request記録が存在する間は
+# 一切の打鍵を送らない。既存のagent_is_busy()(画面busy判定)を置き換える
+# ものではなく、その上に重ねるdefense in depthである。
+# 記録ディレクトリが無ければ(通常運用時)findすら呼ばず即falseを返す。
+#
+# 将軍裁定(shogun_ruling_20260917_phaseD (ii)): 解除条件は「決定ファイルの
+# 存在」ではなく「hookが実際に返却し終えた(またはdeadlineで退出した)
+# 事象」= 記録ファイル自身の`hook_result`フィールドの有無とする(足軽7号
+# Phase D QC§4.3が発見した、defer/timeout/決定schema不正の3経路で
+# モーダル残存のままguardが解除されうる穴の是正)。決定ファイルが存在して
+# いてもhook_resultが無ければ未決のまま(送らない側へ倒す)。hook自身が
+# hook_resultを書けずに異常終了した場合に限り、記録の`received_at`から
+# timeout+マージンが経過したことを条件にfail-safe側の例外として解除する
+# (それ以外は迷ったら送らない側を維持する)。
+PERMISSION_REQUESTS_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/queue/state/permission_requests"
+
+# hook側(scripts/permission_request_hook.sh)のTIMEOUT_SECONDS/MARGIN_SECONDS
+# と同じ既定値(1800/10)。環境変数名も揃えてあり、hook側を上書きする際は
+# 同じ値をwatcher側にも与えることで乖離を防げる。
+PERMISSION_REQUEST_TIMEOUT_SECONDS="${PERMISSION_HOOK_TIMEOUT_SECONDS:-1800}"
+PERMISSION_REQUEST_MARGIN_SECONDS="${__PERMISSION_HOOK_MARGIN_SECONDS:-10}"
+
+# 記録ファイル1件が解決済み(hookが返却し終えた)かどうか。hook_resultは
+# hookが記録ファイルへ原子的に追記するトップレベルfieldであり、値の中身
+# (outcome: allow/deny/defer_timeout/failed)は問わない — 存在すること
+# 自体が「hookがstdoutへ出すか力尽きて退出するかを終えた」事象を意味する。
+_permission_request_resolved() {
+    /usr/bin/grep -qE '^hook_result:' "$1" 2>/dev/null
+}
+
+# 記録ファイル1件についてfail-safe timeout(timeout+マージン)を超過して
+# いるか。received_atが読めない/解釈できない場合は「超過していない」
+# (=未決のまま送らない)側に倒す。
+_permission_request_failsafe_expired() {
+    local req_file="$1" raw val epoch now
+    raw="$(/usr/bin/grep -m1 '^received_at:' "$req_file" 2>/dev/null)"
+    [ -n "$raw" ] || return 1
+
+    val="${raw#received_at:}"
+    val="${val#"${val%%[![:space:]]*}"}"
+    val="${val%\'}"; val="${val#\'}"
+    val="${val%\"}"; val="${val#\"}"
+    val="${val%$'\r'}"
+
+    epoch="$(date -u -d "$val" +%s 2>/dev/null)" || return 1
+    [ -n "$epoch" ] || return 1
+
+    now="$(date -u +%s)"
+    [ $(( now - epoch )) -gt $(( PERMISSION_REQUEST_TIMEOUT_SECONDS + PERMISSION_REQUEST_MARGIN_SECONDS )) ]
+}
+
+# 戻り値: 0(true)=未決記録が1件以上存在する(打鍵してはならない)
+#         1(false)=未決記録なし(記録ディレクトリ不在/該当ファイルなし/
+#                   全記録がhook_result保有 or fail-safe timeout超過)
+has_pending_permission_request() {
+    [ -d "$PERMISSION_REQUESTS_DIR" ] || return 1
+
+    local req_file
+    while IFS= read -r -d '' req_file; do
+        _permission_request_resolved "$req_file" && continue
+        _permission_request_failsafe_expired "$req_file" && continue
+        return 0
+    done < <(find "$PERMISSION_REQUESTS_DIR" -maxdepth 1 -name "${AGENT_ID}_*.yaml" -print0 2>/dev/null)
+
+    return 1
+}
+
 acquire_inbox_lock() {
     local lock_dir="${LOCKFILE}.d"
     local i=0
@@ -163,6 +241,16 @@ NEW_CONTEXT_SENT=${NEW_CONTEXT_SENT:-0}
 # Tracks whether we sent a startup prompt (Codex) that includes full recovery.
 # When set, skip follow-up nudge for this cycle (agent already knows what to do).
 STARTUP_PROMPT_SENT=${STARTUP_PROMPT_SENT:-0}
+
+# ─── clear_command 保留状態 (cmd_792②) ───
+# 実効CLIがcodex/opencodeのclear_commandは、get_unread_infoが抽出時に既読化せず
+# (specialsにidと held=H を載せる)、reset(Codexは起動プロンプトまで)が完了した
+# IDだけを mark_clear_command_read で既読化する。busy/permission保留・送信失敗では
+# read:false のまま次巡回へ持ち越す。
+# Codexで /new は送れたが起動プロンプトがbusyで保留されたとき、そのclearのIDだけを
+# ここに持つ。次巡回は /new を再送せず、起動プロンプトのみを再判定する。
+# watcherプロセス内のメモリのみ(永続state・新しいpolling loopは作らない)。
+PENDING_STARTUP_CLEAR_ID=${PENDING_STARTUP_CLEAR_ID:-}
 
 # ─── Phase feature flags (cmd_107 Phase 1/2/3) ───
 # ASW_PHASE:
@@ -307,8 +395,9 @@ normalize_special_command() {
             fi
             ;;
         cli_restart)
-            # cli_restart is handled externally by switch_cli.sh, not via send_cli_command.
-            # Emit a marker so the main loop can call switch_cli.sh.
+            # cli_restart: cmd_760 A-4によりswitch_cli.shへの自動委譲は廃した。
+            # ここではマーカーを返すのみ。send_cli_command側がこれを検知し、
+            # switch_cli.shを呼ばず人手実行の案内をログへ残す(人経路)。
             echo "__CLI_RESTART__:${raw_content}"
             ;;
     esac
@@ -433,6 +522,17 @@ PY
 # Returns JSON lines: {"count": N, "has_special": true/false, "specials": [...]}
 # Test anchor for bats awk pattern: get_unread_info\\(\\)
 get_unread_info() {
+    # cmd_792②: 実効CLIがcodex/opencodeのclear_commandは抽出時に既読化せず保持する
+    # (送信が実際に完了したIDだけを mark_clear_command_read が既読化する)。
+    # shogunはsend_cli_commandが一切の打鍵を拒むため対象外(従来どおり抽出時に既読化)。
+    # 実効CLIは send_cli_command と同じ get_effective_cli_type(pane優先)で解決する。
+    local hold_clear=0 hold_cli=""
+    if [ "$AGENT_ID" != "shogun" ]; then
+        hold_cli=$(get_effective_cli_type)
+        case "$hold_cli" in
+            codex|opencode) hold_clear=1 ;;
+        esac
+    fi
     (
         # acquire_inbox_lock also takes flock when available.
         if ! acquire_inbox_lock; then
@@ -440,12 +540,13 @@ get_unread_info() {
             exit 0
         fi
         trap release_inbox_lock EXIT
-        INBOX_PATH="$INBOX" "$SCRIPT_DIR/.venv/bin/python3" - << 'PY'
+        INBOX_PATH="$INBOX" HOLD_CLEAR="$hold_clear" "$SCRIPT_DIR/.venv/bin/python3" - << 'PY'
 import json
 import os
 import yaml
 
 inbox = os.environ.get("INBOX_PATH", "")
+hold_clear = os.environ.get("HOLD_CLEAR", "0") == "1"
 try:
     with open(inbox, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
@@ -453,12 +554,27 @@ try:
     messages = data.get("messages", []) or []
     unread = [m for m in messages if not m.get("read", False)]
     special_types = ("clear_command", "model_switch", "cli_restart")
+    # cli_restart は cmd_760 A-4 により自動経路から switch_cli.sh を呼ばず、
+    # 人手で `--human-initiated` 実行されるまで未読のまま残す(人経路)。
+    # clear_command / model_switch は現行どおり抽出時点で既読化する
+    # (巻き戻し後の自動 /clear・/model 送信動作は変更しない)。
+    # ★ただし hold_clear(codex/opencode宛て)の clear_command だけは抽出時に
+    #   既読化しない(cmd_792②)。busy/permission保留・送信失敗で消えないよう
+    #   未読のまま specials に載せ(held=true)、完了したIDだけ呼出側が既読化する。
+    auto_ack_types = ("clear_command", "model_switch")
+
+    def is_held(m):
+        return hold_clear and m.get("type") == "clear_command"
+
     specials = [m for m in unread if m.get("type") in special_types]
 
-    if specials:
-        for m in messages:
-            if not m.get("read", False) and m.get("type") in special_types:
-                m["read"] = True
+    ack_targets = [
+        m for m in messages
+        if not m.get("read", False) and m.get("type") in auto_ack_types and not is_held(m)
+    ]
+    if ack_targets:
+        for m in ack_targets:
+            m["read"] = True
 
         tmp_path = f"{inbox}.tmp.{os.getpid()}"
         with open(tmp_path, "w", encoding="utf-8") as f:
@@ -477,7 +593,15 @@ try:
     payload = {
         "count": normal_count,
         "has_task_assigned": has_task_assigned,
-        "specials": [{"type": m.get("type", ""), "content": m.get("content", "")} for m in specials],
+        "specials": [
+            {
+                "type": m.get("type", ""),
+                "content": m.get("content", ""),
+                "id": m.get("id", ""),
+                "held": bool(is_held(m)),
+            }
+            for m in specials
+        ],
     }
     print(json.dumps(payload))
 except Exception:
@@ -486,32 +610,136 @@ PY
     ) 200>"$LOCKFILE" 2>/dev/null
 }
 
+# ─── 完了した clear_command のIDだけを既読化する (cmd_792②) ───
+# get_unread_info が保持した(read:false のまま)codex/opencode宛て clear_command は、
+# reset(Codexは起動プロンプトまで)が完了した後に、このhelperで1件ずつ既読化する。
+# 送信中にロックは保持しない: 共有inbox lock(acquire_inbox_lock)を取り直し、
+# ★inboxを再読込してid完全一致かつtype=clear_commandのときだけ read:true にして、
+# tmp+os.replaceで原子的に置換する(抽出後に追加された別IDには触れない)。
+# 結果(ACKED / ALREADY / MISSING / MISMATCH / ERROR / LOCK_FAILED)はstderrへ
+# [CLEAR-ACK] として記録する(stdoutは使わない: set -e下で呼出元が if で受ける)。
+# 戻り値: 0=このIDについて保持すべき未読は残っていない(ACKED/ALREADY/MISSING)
+#         1=既読化できなかった(未読のまま残る。次巡回で再試行される)
+mark_clear_command_read() {
+    local target_id="${1:-}"
+    if [ -z "$target_id" ] || [ "$target_id" = "-" ]; then
+        echo "[$(date)] [CLEAR-ACK] $AGENT_ID id=<none> result=NO_ID — cannot ack a clear_command without id (kept unread)" >&2
+        return 1
+    fi
+    local result
+    result=$(
+        (
+            if ! acquire_inbox_lock; then
+                echo "LOCK_FAILED"
+                exit 0
+            fi
+            trap release_inbox_lock EXIT
+            INBOX_PATH="$INBOX" TARGET_ID="$target_id" "$SCRIPT_DIR/.venv/bin/python3" - << 'PY'
+import os
+import yaml
+
+inbox = os.environ.get("INBOX_PATH", "")
+target_id = os.environ.get("TARGET_ID", "")
+try:
+    with open(inbox, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    messages = data.get("messages", []) or []
+    matches = [m for m in messages if m.get("id") == target_id]
+    if not matches:
+        print("MISSING")
+        raise SystemExit(0)
+    target = matches[0]
+    if target.get("type") != "clear_command":
+        print("MISMATCH")
+        raise SystemExit(0)
+    if target.get("read", False):
+        print("ALREADY")
+        raise SystemExit(0)
+
+    target["read"] = True
+    tmp_path = f"{inbox}.tmp.{os.getpid()}"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(
+            data,
+            f,
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=False,
+        )
+    os.replace(tmp_path, inbox)
+    print("ACKED")
+except SystemExit:
+    raise
+except Exception:
+    print("ERROR")
+PY
+        ) 200>"$LOCKFILE" 2>/dev/null
+    )
+    result="${result##*$'\n'}"
+    [ -n "$result" ] || result="ERROR"
+    echo "[$(date)] [CLEAR-ACK] $AGENT_ID id=$target_id result=$result" >&2
+    case "$result" in
+        ACKED|ALREADY|MISSING) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ─── hold モード専用の send-keys (cmd_792②) ───
+# 非0(失敗/timeout)を握りつぶさず、理由ログを残して非0を返す。呼出元は未読を保持する。
+# 通常のsend_cli_command経路(第2引数なし)はこのhelperを使わない。
+_hold_send_keys() {
+    local what="$1"
+    shift
+    if ! timeout 5 tmux send-keys -t "$PANE_TARGET" "$@" 2>/dev/null; then
+        echo "[$(date)] [CLEAR-HOLD] $AGENT_ID: tmux send-keys failed at '$what' — not sent, clear_command kept unread" >&2
+        return 1
+    fi
+    return 0
+}
+
 # ─── Send CLI command via pty direct write ───
 # For /clear and /model only. These are CLI commands, not conversation messages.
 # CLI_TYPE別分岐: claude→そのまま, codex→/clear対応・/modelスキップ,
 #                  copilot→Ctrl-C+再起動・/modelスキップ, opencode→/clear→/new・/modelスキップ
 # 実行時にtmux paneの @agent_cli を再確認し、ドリフト時はpane値を優先する。
+#
+# 第2引数 "hold" (cmd_792②): codex/opencode宛て clear_command 専用。get_unread_info が
+# 未読のまま保持した要求を送るときだけ process_unread が渡す。他の呼出し(Claudeの/clear・
+# 足軽4分エスカレーション・model_switch)は第2引数なし=従来どおり。holdでは「成功」を
+# 厳密にする: busy/permission保留・tmux send-keysの非0は成功扱いにせず非0を返す。
+#   0 = reset完了(Codexは起動プロンプトまで/OpenCodeは/new受付)。呼出元が既読化してよい
+#   1 = 送っていない(guard/busy保留・send-keys失敗)。呼出元は未読のまま保持する
+#   2 = Codexで /new は送れたが起動プロンプトがbusy等で保留(NEW_CONTEXT_SENT=1)。
+#       呼出元は同IDを未読のまま保持し、次巡回は /new を再送せず起動プロンプトのみ再判定する
 send_cli_command() {
     local cmd="$1"
+    local hold_mode=0
+    [ "${2:-}" = "hold" ] && hold_mode=1
     local effective_cli
     effective_cli=$(get_effective_cli_type)
 
-    # cli_restart: delegate to switch_cli.sh (full /exit → relaunch cycle)
+    # cli_restart: cmd_754将軍裁定E-1によりswitch_cli.shは--human-initiated必須
+    # である。自動経路(本関数)から--human-initiated無しで呼べば拒否されるため、
+    # cmd_760 A-4によりswitch_cli.shへの委譲自体を自動経路から外した。実行は
+    # 一切行わず、人手での実行を案内するログのみ残す(未読保持は呼出元が担う)。
     if [[ "$cmd" == __CLI_RESTART__:* ]]; then
         local restart_args="${cmd#__CLI_RESTART__:}"
-        echo "[$(date)] [CLI-RESTART] Delegating to switch_cli.sh for $AGENT_ID: ${restart_args}" >&2
-        bash "${SCRIPT_DIR}/scripts/switch_cli.sh" "$AGENT_ID" $restart_args 2>&1 | while IFS= read -r line; do  # SCRIPT_DIR=project_root
-            echo "[$(date)] [switch_cli] $line" >&2
-        done
-        # Update effective CLI type after restart
-        CLI_TYPE=$(tmux show-options -p -t "$PANE_TARGET" -v @agent_cli 2>/dev/null || echo "$CLI_TYPE")
-        return 0
+        echo "[$(date)] [CLI-RESTART-HUMAN-PATH] $AGENT_ID: cli_restart は自動経路からswitch_cli.shを呼ばぬ(cmd_760 A-4)。人手で \`bash scripts/switch_cli.sh ${AGENT_ID} --human-initiated ${restart_args}\` を実行されたし。" >&2
+        return 1
     fi
 
     # Safety: never inject CLI commands into the shogun pane.
     # Shogun is controlled by the Lord; keystroke injection can clobber human input.
     if [ "$AGENT_ID" = "shogun" ]; then
         echo "[$(date)] [SKIP] shogun: suppressing CLI command injection ($cmd)" >&2
+        return 1
+    fi
+
+    # ★permission_request pending guard (cmd_775 Phase C, 将軍裁定(c))
+    # /clear・model_switchいずれも、決定待ちの間は一切送らない(fail-safe)。
+    if has_pending_permission_request; then
+        echo "[$(date)] [SKIP] $AGENT_ID has a pending permission_request — suppressing $cmd (confirmation modal may be on screen)" >&2
         return 1
     fi
 
@@ -526,6 +754,8 @@ send_cli_command() {
     fi
     if [[ "$cmd" == "/clear" ]] && ! [[ "$effective_cli" == "opencode" && -z "${pane_snapshot//[[:space:]]/}" ]] && agent_is_busy; then
         echo "[$(date)] [SKIP] Agent is busy — /clear deferred to next cycle (agent=$AGENT_ID)" >&2
+        # hold: 送っていない。成功(0)を返すと呼出元が既読化してしまうため非0で返す。
+        [ "$hold_mode" -eq 1 ] && return 1
         return 0
     fi
 
@@ -540,6 +770,26 @@ send_cli_command() {
                 if [ "${NEW_CONTEXT_SENT:-0}" -eq 1 ]; then
                     echo "[$(date)] [SKIP] Codex /new already sent for $AGENT_ID — skipping duplicate clear_command" >&2
                     return 0
+                fi
+                if [ "$hold_mode" -eq 1 ]; then
+                    # cmd_792②: send-keysの非0を握りつぶさず、/new+Enterが受け付けられた
+                    # ときだけ送信済みとする。起動プロンプトは strict で送り、busyなら
+                    # 強行せず rc=2(保留)で返す。
+                    echo "[$(date)] [SEND-KEYS] Codex /clear→/new (hold): starting new conversation for $AGENT_ID" >&2
+                    _hold_send_keys "dismiss-suggestion" "x" || return 1
+                    sleep 0.3
+                    _hold_send_keys "clear-input" C-u || return 1
+                    sleep 0.3
+                    _hold_send_keys "/new-text" "/new" || return 1
+                    sleep 0.3
+                    _hold_send_keys "/new-enter" Enter || return 1
+                    sleep 3
+                    NEW_CONTEXT_SENT=1
+                    if send_startup_prompt strict; then
+                        return 0
+                    fi
+                    echo "[$(date)] [CLEAR-HOLD] $AGENT_ID cli=codex: /new sent but startup prompt deferred — clear_command kept unread; next cycle re-evaluates startup only (no /new resend)" >&2
+                    return 2
                 fi
                 echo "[$(date)] [SEND-KEYS] Codex /clear→/new: starting new conversation for $AGENT_ID" >&2
                 # Dismiss suggestion UI first (typing "x" clears autocomplete prompt)
@@ -566,6 +816,19 @@ send_cli_command() {
             if [[ "$cmd" == "/clear" ]]; then
                 if [ "${NEW_CONTEXT_SENT:-0}" -eq 1 ]; then
                     echo "[$(date)] [SKIP] OpenCode /new already sent for $AGENT_ID — skipping duplicate clear_command" >&2
+                    return 0
+                fi
+                if [ "$hold_mode" -eq 1 ]; then
+                    # cmd_792②: send-keysの非0を握りつぶさない。OpenCodeに起動プロンプトは
+                    # 追加しない(agent定義が自動読込される)ので、/new受付がreset完了。
+                    echo "[$(date)] [SEND-KEYS] OpenCode /new for clear_command (hold): starting new conversation for $AGENT_ID" >&2
+                    _hold_send_keys "clear-input" C-u || return 1
+                    sleep 0.3
+                    _hold_send_keys "/new-text" "/new" || return 1
+                    sleep 0.3
+                    _hold_send_keys "/new-enter" Enter || return 1
+                    sleep 3
+                    NEW_CONTEXT_SENT=1
                     return 0
                 fi
                 echo "[$(date)] [SEND-KEYS] OpenCode /new for clear_command: starting new conversation for $AGENT_ID" >&2
@@ -637,9 +900,26 @@ send_cli_command() {
 # full recovery steps (identify, read task YAML, read inbox, start work).
 # Codex uses a typed `x` to dismiss its suggestion UI.
 # Called from both send_cli_command (clear_command) and send_context_reset.
+#
+# 第1引数 "strict" (cmd_792②): Codexの明示clear_command(hold経路)からだけ渡す。
+# 15秒待った末になお busy でも強行せず、permission保留・send-keys失敗とあわせて
+# 「送っていない」を非0で返す(呼出元は同clearを未読のまま保持し、次巡回で再判定する)。
+# strictなしの呼出し(Claude/Codexの通常task_assigned経路)は従来どおり:
+# busyでも強行し、permission保留は0を返す。
 send_startup_prompt() {
+    local strict=0
+    [ "${1:-}" = "strict" ] && strict=1
+
+    # ★permission_request pending guard (cmd_775 Phase C, 将軍裁定(c))
+    if has_pending_permission_request; then
+        echo "[$(date)] [SKIP] $AGENT_ID has a pending permission_request — suppressing startup prompt (confirmation modal may be on screen)" >&2
+        [ "$strict" -eq 1 ] && return 1
+        return 0
+    fi
+
     # Poll until agent becomes idle (prompt ready) instead of fixed sleep.
-    # Max 15s (3 attempts × 5s). If still busy after 15s, proceed anyway.
+    # Max 15s (3 attempts × 5s). If still busy after 15s, proceed anyway
+    # (strict: do NOT force — return non-zero so the caller keeps the request).
     local attempt
     for attempt in 1 2 3; do
         sleep 5
@@ -650,6 +930,10 @@ send_startup_prompt() {
         echo "[$(date)] [STARTUP] $AGENT_ID still busy after ${attempt}×5s — retrying" >&2
     done
     if agent_is_busy; then
+        if [ "$strict" -eq 1 ]; then
+            echo "[$(date)] [CLEAR-HOLD] $AGENT_ID still busy after 15s — startup prompt NOT forced (deferred to next cycle)" >&2
+            return 1
+        fi
         echo "[$(date)] [STARTUP] $AGENT_ID still busy after 15s — proceeding with startup prompt anyway" >&2
     fi
 
@@ -664,6 +948,21 @@ send_startup_prompt() {
     effective_cli=$(get_effective_cli_type)
     echo "[$(date)] [STARTUP] Sending startup prompt to $AGENT_ID (${effective_cli}): ${startup_prompt:0:80}..." >&2
     # Dismiss suggestion UI, then send startup prompt
+    if [ "$strict" -eq 1 ]; then
+        # strict: 打鍵の非0を握りつぶさない。送れたと言えるのはプロンプト本文とEnterが
+        # 受け付けられたときだけ(失敗時は STARTUP_PROMPT_SENT を立てず非0で返す)。
+        if [[ "$effective_cli" != "opencode" ]]; then
+            _hold_send_keys "startup-dismiss" "x" || return 1
+            sleep 0.3
+            _hold_send_keys "startup-clear-input" C-u || return 1
+            sleep 0.3
+        fi
+        _hold_send_keys "startup-text" -l "$startup_prompt" || return 1
+        sleep 0.3
+        _hold_send_keys "startup-enter" Enter || return 1
+        STARTUP_PROMPT_SENT=1
+        return 0
+    fi
     if [[ "$effective_cli" != "opencode" ]]; then
         timeout 5 tmux send-keys -t "$PANE_TARGET" "x" 2>/dev/null || true
         sleep 0.3
@@ -693,6 +992,12 @@ send_context_reset() {
     if [ "$AGENT_ID" = "shogun" ] || [ "$AGENT_ID" = "karo" ] || [ "$AGENT_ID" = "gunshi" ]; then
         echo "[$(date)] [SKIP] $AGENT_ID: suppressing context reset (command-layer agent)" >&2
         return 0
+    fi
+
+    # ★permission_request pending guard (cmd_775 Phase C, 将軍裁定(c))
+    if has_pending_permission_request; then
+        echo "[$(date)] [SKIP] $AGENT_ID has a pending permission_request — suppressing context reset (confirmation modal may be on screen)" >&2
+        return 1
     fi
 
     local reset_cmd
@@ -840,6 +1145,12 @@ send_wakeup() {
     local unread_count="$1"
     local nudge="inbox${unread_count}"
 
+    # ★permission_request pending guard (cmd_775 Phase C, 将軍裁定(c)) — 最優先判定
+    if has_pending_permission_request; then
+        echo "[$(date)] [SKIP] $AGENT_ID has a pending permission_request — suppressing nudge (confirmation modal may be on screen)" >&2
+        return 0
+    fi
+
     if [ "${FINAL_ESCALATION_ONLY:-0}" = "1" ]; then
         echo "[$(date)] [SKIP] FINAL_ESCALATION_ONLY=1, suppressing normal nudge for $AGENT_ID" >&2
         return 0
@@ -937,6 +1248,13 @@ send_wakeup() {
 send_wakeup_with_escape() {
     local unread_count="$1"
     local nudge="inbox${unread_count}"
+
+    # ★permission_request pending guard (cmd_775 Phase C, 将軍裁定(c)) — 全CLI分岐より先に判定
+    if has_pending_permission_request; then
+        echo "[$(date)] [SKIP] $AGENT_ID has a pending permission_request — suppressing Phase 2 escalation (confirmation modal may be on screen)" >&2
+        return 0
+    fi
+
     local effective_cli
     effective_cli=$(get_effective_cli_type)
 
@@ -1005,6 +1323,91 @@ send_wakeup_with_escape() {
     return 0  # Never return 1 — set -euo pipefail would kill the watcher daemon
 }
 
+# ─── 保持された clear_command 1件の処理 (cmd_792②) ───
+# get_unread_info が抽出時に既読化せず(read:false のまま)specialsへ載せた、
+# 実効CLIがcodex/opencode宛ての clear_command を1件処理する。
+# 戻り値: 0=完了(reset完了して既読化した/同batchで /new 送信済みの重複として吸収した)
+#         1=保留(read:false のまま次巡回へ。理由は [CLEAR-HOLD] へ記録する)
+# 他agentのguard・CLI別送信手順は send_cli_command(hold) に委ね、ここでは新しい
+# 配送機構を持たない。既読化は完了したID1件ずつ mark_clear_command_read で行う。
+_clear_hold_log() {
+    local clear_id="$1" hold_cli="$2" reason="$3"
+    echo "[$(date)] [CLEAR-HOLD] $AGENT_ID id=$clear_id cli=$hold_cli reason=$reason — clear_command kept unread (read:false); re-evaluated next cycle" >&2
+}
+
+handle_held_clear_command() {
+    local clear_id="$1"
+    local hold_cli reason=""
+    hold_cli=$(get_effective_cli_type)
+
+    # (a) Codexで /new は送信済みだが起動プロンプトだけ保留中。
+    #     /new は再送せず、起動プロンプトのみを再判定する。別IDのclearは
+    #     「保留startupの完了」と取り違えず、先行IDが完結するまで保持する。
+    if [ -n "${PENDING_STARTUP_CLEAR_ID:-}" ]; then
+        if [ "$clear_id" != "$PENDING_STARTUP_CLEAR_ID" ]; then
+            _clear_hold_log "$clear_id" "$hold_cli" "startup_pending_for_${PENDING_STARTUP_CLEAR_ID}"
+            return 1
+        fi
+        if has_pending_permission_request; then
+            reason="permission_request_pending"
+        elif agent_is_busy; then
+            reason="agent_busy_startup_deferred"
+        fi
+        if [ -n "$reason" ]; then
+            _clear_hold_log "$clear_id" "$hold_cli" "$reason"
+            return 1
+        fi
+        if send_startup_prompt strict; then
+            PENDING_STARTUP_CLEAR_ID=""
+            # 送信は済んだ。既読化に失敗しても次巡回は「同batchの重複」として
+            # 既読化のみ再試行し、/new・起動プロンプトは再送しない。
+            mark_clear_command_read "$clear_id" || return 1
+            return 0
+        fi
+        _clear_hold_log "$clear_id" "$hold_cli" "startup_not_sent"
+        return 1
+    fi
+
+    # (b) 同じbatchで /new を送信済み(NEW_CONTEXT_SENT=1)なら重複として吸収する
+    #     (従来の send_cli_command の重複抑止と同じ。打鍵はしない)。
+    if [ "${NEW_CONTEXT_SENT:-0}" -eq 1 ]; then
+        echo "[$(date)] [CLEAR-HOLD] $AGENT_ID id=$clear_id cli=$hold_cli: /new already sent for this batch — absorbing duplicate clear_command (no keystrokes)" >&2
+        mark_clear_command_read "$clear_id" || return 1
+        return 0
+    fi
+
+    # (c) 未送信。送信前の保留条件(確認モーダル・処理中)では打鍵を一切出さない。
+    if has_pending_permission_request; then
+        reason="permission_request_pending"
+    elif agent_is_busy; then
+        reason="agent_busy"
+    fi
+    if [ -n "$reason" ]; then
+        _clear_hold_log "$clear_id" "$hold_cli" "$reason"
+        return 1
+    fi
+
+    local cmd send_rc=0
+    cmd=$(normalize_special_command "clear_command" "")
+    send_cli_command "$cmd" hold || send_rc=$?
+    case "$send_rc" in
+        0)
+            mark_clear_command_read "$clear_id" || return 1
+            return 0
+            ;;
+        2)
+            # Codex: /new 送信済み・起動プロンプト保留。同IDを未読のまま保持する。
+            PENDING_STARTUP_CLEAR_ID="$clear_id"
+            _clear_hold_log "$clear_id" "$hold_cli" "startup_deferred_after_new"
+            return 1
+            ;;
+        *)
+            _clear_hold_log "$clear_id" "$hold_cli" "not_sent_rc=${send_rc}"
+            return 1
+            ;;
+    esac
+}
+
 # ─── Process cycle ───
 process_unread() {
     local trigger="${1:-event}"
@@ -1048,21 +1451,42 @@ process_unread() {
 
     # Handle special CLI commands first (/clear, /model)
     local specials
+    # 各行: type<TAB>id<TAB>held<TAB>content。id/heldは空にならない(欠落は"-")ので
+    # IFS=TAB の read で空フィールドが詰められて列がずれることはない(cmd_792②)。
     specials=$(echo "$info" | "$SCRIPT_DIR/.venv/bin/python3" -c "
 import sys, json
 data = json.load(sys.stdin)
 for s in data.get('specials', []):
     t = s.get('type', '')
+    i = (str(s.get('id', '') or '')).replace('\t', '_').replace('\n', '_').replace(' ', '_').strip() or '-'
+    h = 'H' if s.get('held') else '-'
     c = (s.get('content', '') or '').replace('\t', ' ').replace('\n', ' ').strip()
-    print(f'{t}\t{c}')
+    print(f'{t}\t{i}\t{h}\t{c}')
 " 2>/dev/null)
 
     local clear_seen=0
     local clear_sent=0  # tracks if /clear was actually sent (not just seen)
+    local clear_held=0  # cmd_792②: 保留(未読のまま持ち越す)の対象clearが残ったか
+    local pending_seen=0
     if [ -n "$specials" ]; then
-        local msg_type msg_content cmd
-        while IFS=$'\t' read -r msg_type msg_content; do
+        local msg_type msg_id msg_held msg_content cmd
+        while IFS=$'\t' read -r msg_type msg_id msg_held msg_content; do
             [ -n "$msg_type" ] || continue
+            if [ "$msg_type" = "clear_command" ] && [ "$msg_held" = "H" ]; then
+                # codex/opencode宛て: 抽出時に既読化されていない。完了したIDだけ既読化する。
+                clear_seen=1
+                if handle_held_clear_command "$msg_id"; then
+                    clear_sent=1
+                else
+                    clear_held=1
+                fi
+                # 保留startupのIDを(この周期で新規に立てた場合も含め)未読specialsに見たと記録する。
+                # 呼出し後に判定するのは、handlerが今回の周期で PENDING を立てるため。
+                if [ -n "${PENDING_STARTUP_CLEAR_ID:-}" ] && [ "$msg_id" = "$PENDING_STARTUP_CLEAR_ID" ]; then
+                    pending_seen=1
+                fi
+                continue
+            fi
             if [ "$msg_type" = "clear_command" ]; then
                 clear_seen=1
                 # Busy guard: skip /clear if agent is currently processing.
@@ -1079,6 +1503,18 @@ for s in data.get('specials', []):
                 fi
             fi
         done <<< "$specials"
+    fi
+
+    # 保留中の起動プロンプトのIDがもう未読ではない(外部で既読化された等)なら保留を捨てる。
+    # ただし get_unread_info が失敗(ロック不可・例外)した周期の空specialsを
+    # 「既読になった」と誤認しないよう、有効なpayload(has_task_assigned を持つ)のときだけ。
+    if [ -n "${PENDING_STARTUP_CLEAR_ID:-}" ] && [ "$pending_seen" -eq 0 ]; then
+        local info_valid
+        info_valid=$(echo "$info" | "$SCRIPT_DIR/.venv/bin/python3" -c "import sys,json; print(1 if 'has_task_assigned' in json.load(sys.stdin) else 0)" 2>/dev/null)
+        if [ "$info_valid" = "1" ]; then
+            echo "[$(date)] [CLEAR-HOLD] $AGENT_ID: pending startup id=${PENDING_STARTUP_CLEAR_ID} is no longer unread — dropping pending state" >&2
+            PENDING_STARTUP_CLEAR_ID=""
+        fi
     fi
 
     # /clear は Codex で /new へ変換される。再起動直後の取りこぼし防止として
@@ -1098,6 +1534,17 @@ for s in data.get('specials', []):
             echo "[$(date)] [AUTO-RECOVERY] queued task_assigned for $AGENT_ID ($recovery_id)" >&2
         fi
         info=$(get_unread_info)
+    fi
+
+    # ─── 保留中の clear_command が残る周期 (cmd_792②) ───
+    # 対象paneのresetが終わる前に通常のnudge・escalation・入力欄クリアを流すと、
+    # resetより先に次taskを始めさせたり、reset状態(NEW_CONTEXT_SENT・保留startup ID)を
+    # 「未読0=全既読」と誤認して失ったりする。ゆえにこの周期は通常メッセージ側へ進まず、
+    # カウンタも初期化しない。clearが無い周期の通常メッセージ処理は従来どおり。
+    # 解除は時刻ではなく、保留条件(busy/permission)が消えて送信が完了すること。
+    if [ "$clear_held" -eq 1 ]; then
+        echo "[$(date)] [CLEAR-HOLD] $AGENT_ID: held clear_command remains unread — skipping nudge/escalation/input-clear this cycle (state kept: NEW_CONTEXT_SENT=${NEW_CONTEXT_SENT:-0} pending_startup=${PENDING_STARTUP_CLEAR_ID:-none})" >&2
+        return 0
     fi
 
     # Send wake-up nudge for normal messages (with escalation)
@@ -1154,8 +1601,9 @@ for s in data.get('specials', []):
         # Skip if: (1) already sent this batch, (2) clear_command already handled above,
         #          (3) agent is shogun (human-controlled).
         if [ "$has_task_assigned" = "1" ] && [ "$NEW_CONTEXT_SENT" -eq 0 ] && [ "$clear_seen" -eq 0 ]; then
-            send_context_reset
-            NEW_CONTEXT_SENT=1
+            if send_context_reset; then
+                NEW_CONTEXT_SENT=1
+            fi
         fi
 
         # If startup prompt was just sent (Codex), skip follow-up nudge this cycle.

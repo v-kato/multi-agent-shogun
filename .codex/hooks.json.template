@@ -1,0 +1,21 @@
+{
+  "description": "cmd_757④redo1 (2026-09-09, 足軽6号): Codex CLI 版 Stop/SessionStart hook。command のプレースホルダは scripts/generate_codex_hooks.sh が実行時の PROJECT_ROOT で置換して .codex/hooks.json を生成する(track対象は本テンプレートのみ。生成物 .codex/hooks.json は個人環境の絶対パスを含むため .gitignore 対象)。適用にはセッション側で /hooks → t (trust all) が別途必要(未 trust の間は完全に無効。有効化手順・実機gateは docs/codex_hook_activation.md 参照)。★command は script 自身への絶対パス限定(shebang 実行)。'bash <path>' や相対パス、touch 等の裸コマンドは隔離環境の実機検証で silent に不発火と確認済み(argv[0] が project 木の外の実行体だと発火しない)。",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "__PROJECT_ROOT__/scripts/codex_session_start_hook.sh" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "__PROJECT_ROOT__/scripts/stop_hook_inbox.sh" }
+        ]
+      }
+    ]
+  }
+}

@@ -62,6 +62,99 @@ else
     CLI_ADAPTER_LOADED=false
 fi
 
+# mesh登録確認ライブラリ読み込み（cmd_759 A-3・read-only。CLI起動そのものには
+# 無関係のため、読み込みに失敗しても出陣は続行しチェックのみ省く）
+if [ -f "$SCRIPT_DIR/lib/mesh_registration_check.sh" ]; then
+    source "$SCRIPT_DIR/lib/mesh_registration_check.sh"
+    MESH_CHECK_LOADED=true
+else
+    MESH_CHECK_LOADED=false
+fi
+
+# Claude会話resumeライブラリ読み込み（cmd_785・opt-in。読み込めなければ
+# 従来どおり全agentを新規起動する）
+if [ -f "$SCRIPT_DIR/lib/claude_session_resume.sh" ]; then
+    source "$SCRIPT_DIR/lib/claude_session_resume.sh"
+    CLAUDE_RESUME_LOADED=true
+else
+    CLAUDE_RESUME_LOADED=false
+fi
+
+# shutsujin_mesh_check — STEP 6.9本体(cmd_759 redo1)
+# ★依存するグローバル変数(呼出し時点で定義済みであること): AGENT_IDS[]・
+#   PANE_BASE・SCRIPT_DIR。pane観測(mesh登録確認)はread-onlyであり、
+#   対象peerへの入力送信・再起動は一切行わない。ただしstate永続化と、
+#   未登録検知時のKaro inboxへのdelivery_alert通知(下記参照)は行う。
+#
+# ★G759-ERREXIT-01是正: check_mesh_registrationは未登録を正常な観測結果
+#   として出力しつつstatus 1を返す。これを単純代入で受けると、set -e下では
+#   最初の未登録検出でシェルが即座に終了し、一覧蓄積・state書込みへ
+#   到達しない。`if ! _mesh_result=$(...); then`という明示的な条件文の中で
+#   捕捉することで、未登録が起きても関数全体が継続することを保証する。
+# ★G759-STATE-DIR-03是正: 書込み直前にmkdir -pし、preflight自身が
+#   出力先ディレクトリの存在を保証する(STEP 2の初期化と二重になるが、
+#   この関数が単独で呼ばれても自己完結して安全に書けるようにするため)。
+# ★G759-DASHBOARD-PATH-02是正: state file書込み後、未登録が1件以上あれば
+#   家老inboxへdelivery_alert型で通知する。これにより家老のInbox
+#   Processing Protocolが確実に拾い、dashboard.md🚨要対応へ転記できる
+#   有限の経路が成立する。inbox_write.sh呼出し自体もif!で捕捉し、
+#   通知に失敗しても出陣シーケンス全体は継続する。
+shutsujin_mesh_check() {
+    local _MESH_AGENTS=("shogun")
+    local _MESH_PANES=("shogun:main")
+    local i
+    for i in "${!AGENT_IDS[@]}"; do
+        local p=$((PANE_BASE + i))
+        _MESH_AGENTS+=("${AGENT_IDS[$i]}")
+        _MESH_PANES+=("multiagent:agents.${p}")
+    done
+
+    local _mesh_checked=0
+    local _mesh_unregistered_agent=()
+    local _mesh_unregistered_pane=()
+    local _mesh_unregistered_detail=()
+    for i in "${!_MESH_AGENTS[@]}"; do
+        local _pane="${_MESH_PANES[$i]}"
+        local _pane_cli
+        _pane_cli=$(tmux show-options -p -t "$_pane" -v @agent_cli 2>/dev/null || echo "")
+        [ "$_pane_cli" = "claude" ] || continue
+        _mesh_checked=$((_mesh_checked + 1))
+        local _mesh_result
+        if ! _mesh_result=$(check_mesh_registration "$_pane"); then
+            _mesh_unregistered_agent+=("${_MESH_AGENTS[$i]}")
+            _mesh_unregistered_pane+=("$_pane")
+            _mesh_unregistered_detail+=("$_mesh_result")
+        fi
+    done
+
+    mkdir -p "$SCRIPT_DIR/queue/state"
+
+    {
+        printf 'timestamp: "%s"\n' "$(date '+%Y-%m-%dT%H:%M:%S+09:00')"
+        printf 'checked: %d\n' "$_mesh_checked"
+        printf 'unregistered_count: %d\n' "${#_mesh_unregistered_agent[@]}"
+        if [ "${#_mesh_unregistered_agent[@]}" -eq 0 ]; then
+            printf 'unregistered: []\n'
+        else
+            printf 'unregistered:\n'
+            for i in "${!_mesh_unregistered_agent[@]}"; do
+                printf -- '- agent_id: "%s"\n  pane: "%s"\n  detail: "%s"\n' \
+                    "${_mesh_unregistered_agent[$i]}" "${_mesh_unregistered_pane[$i]}" "${_mesh_unregistered_detail[$i]}"
+            done
+        fi
+    } > "$SCRIPT_DIR/queue/state/mesh_registration_status.yaml"
+
+    if [ "${#_mesh_unregistered_agent[@]}" -gt 0 ]; then
+        log_info "  └─ ⚠️  mesh未登録 ${#_mesh_unregistered_agent[@]}/${_mesh_checked}件 → queue/state/mesh_registration_status.yaml（家老確認要・再起動はしていない）"
+        local _mesh_notify_content="出陣直後のmesh登録確認で${#_mesh_unregistered_agent[@]}/${_mesh_checked}件が未登録でした(queue/state/mesh_registration_status.yaml参照)。再起動は行っていません。"
+        if ! bash "$SCRIPT_DIR/scripts/inbox_write.sh" karo "$_mesh_notify_content" delivery_alert shutsujin_departure; then
+            log_info "  └─ ⚠️  家老へのinbox通知に失敗しました(手動確認要)"
+        fi
+    else
+        log_success "  └─ mesh登録 ${_mesh_checked}件 全て確認"
+    fi
+}
+
 # 足軽IDリストと人数を動的に取得（settings.yaml から）
 if [ "$CLI_ADAPTER_LOADED" = true ]; then
     _ASHIGARU_IDS_STR=$(get_ashigaru_ids)
@@ -81,6 +174,61 @@ log_success() {
 
 log_war() {
     echo -e "\033[1;31m【戦】\033[0m $1"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ★出陣時の打鍵 (cmd_754 将軍裁定 E-5 — 実装者の判断)
+# ═══════════════════════════════════════════════════════════════════════════════
+# 裁定 E-1 が廃したのは「agent CLI が★動いている pane への自動打鍵」である。
+# 出陣が打つのは、これから CLI を起動する pane、すなわち★まだ CLI が動いて
+# いない pane である。E-5 はこの扱いを実装者に委ねた。判断は「残す」である。
+#
+#   残す理由:
+#     (1) 事故の形が成立しない。誤爆とは「TUI が出したモーダルの既定選択肢を
+#         Enter が押す」ことであった。CLI が動いていない pane に TUI は無く、
+#         モーダルも既定選択肢も存在しない。
+#     (2) 廃せば得られる安全が無く、失うものだけが確実である。人が 10 個の
+#         pane へ手ずから CLI 起動コマンドを打ち込むことになる。
+#     (3) 将軍の既定「agent CLI が動いている pane へは送らない」を、そのまま
+#         満たしている。
+#
+#   ★ただし無条件では残さない。出陣は「セッションが既に在れば作り直さず
+#     使い回す」ため、★既に agent が稼働している pane へ起動コマンドを
+#     打ち込む経路が実在した。これは E-1 が廃した当のものである。
+#     よって打鍵の直前に、pane の★前景プロセスが素のシェルであることを
+#     確かめる。画面は読まない(lib/pane_preflight.sh の pane_is_bare_shell)。
+#
+#   ★残余リスク(正直に記す): 素のシェルであっても、人がその prompt で何かを
+#     打っている最中なら混ざる。出陣は人が自ら叩く起動手順ゆえ、その人が
+#     居合わせている前提を置く。
+_pane_preflight_lib="$SCRIPT_DIR/lib/pane_preflight.sh"
+if [ -f "$_pane_preflight_lib" ]; then
+    source "$_pane_preflight_lib"
+fi
+
+# 起動打鍵を送れなかった pane の記録（末尾で人へ報せる）
+SHUTSUJIN_SKIPPED_PANES=""
+
+# shutsujin_send_launch <pane> <purpose> <send-keys引数...>
+# ★CLI が動いていない pane にだけ打鍵する。動いていれば送らず記録する。
+# Returns: 0 = 送った / 1 = 送らなかった
+shutsujin_send_launch() {
+    local pane="$1"
+    local purpose="$2"
+    shift 2
+
+    if ! declare -f pane_is_bare_shell >/dev/null 2>&1; then
+        log_info "  ⚠️  lib/pane_preflight.sh を読み込めておらぬ。${purpose} を送らぬ (pane=${pane})"
+        SHUTSUJIN_SKIPPED_PANES="${SHUTSUJIN_SKIPPED_PANES}${pane} (preflightライブラリ不在)\n"
+        return 1
+    fi
+    if ! pane_is_bare_shell "$pane"; then
+        log_info "  ⚠️  ${pane} は素のシェルではない (${PANE_SHELL_REASON:-unknown})。${purpose} を送らぬ"
+        log_info "      ★既に CLI が動いている見込みである。稼働中の pane へ打鍵せぬのが cmd_754 の裁定である。"
+        SHUTSUJIN_SKIPPED_PANES="${SHUTSUJIN_SKIPPED_PANES}${pane} (${PANE_SHELL_REASON:-unknown})\n"
+        return 1
+    fi
+    tmux send-keys -t "$pane" "$@"
 }
 
 # OpenCode は複数プロセスを短時間に連続起動すると WSL2 上で SIGILL に
@@ -120,6 +268,304 @@ generate_prompt() {
         esac
         echo "(\[\033[${color_code}m\]${label}\[\033[0m\]) \[\033[1;32m\]\w\[\033[0m\]\$ "
     fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# agent pane を login session の runtime dir から切り離す（cmd_784）
+# ───────────────────────────────────────────────────────────────────────────────
+# Claude Code は mesh(ListAgents/SendMessage)の socket を
+#   ${XDG_RUNTIME_DIR:-${CLAUDE_CODE_TMPDIR:-${TMPDIR:-/tmp}}}/cc-socks/<pid>.sock
+# へ bind する（本体 2.1.284 の実測。一次置場を作れぬ時・パスが 103byte を
+# 超える時のみ /tmp/cc-socks-<uid>/ へ退避する）。
+# XDG_RUNTIME_DIR(/run/user/<uid>) は logind が login session の寿命に合わせて
+# 作り・消す dir であり、tmux 上で session より長く生きる agent の置場とは
+# 寿命が合わない。2026-09-29 には WSL2+systemd で出陣直後に login session が
+# 外れて /run/user/1000 が撤去され、全 agent の socket が到達不能になった
+# (SSH で出陣して切断した場合など、linger 無しの Linux 一般で同じことが起きる)。
+# ゆえに agent pane の shell から XDG_RUNTIME_DIR を外し、本体の置場を
+# login session に依らぬ一時 dir 側(既定では /tmp/cc-socks)へ倒す。
+#   - pane の shell 自身から外す(shutsujin_pane_init_cmd): 出陣時の起動だけで
+#     なく、同じ pane で後から CLI を起こし直す経路(switch_cli.sh 等)にも効く。
+#   - session 環境に除去印を付ける(shutsujin_detach_runtime_dir): 以後その
+#     session に作られる pane にも効く。
+#   ★tmux server の global 環境は触らない(殿の他の tmux session を巻き込まぬ)。
+# ═══════════════════════════════════════════════════════════════════════════════
+shutsujin_detach_runtime_dir() {
+    local session="$1"
+    if ! tmux set-environment -t "$session" -r XDG_RUNTIME_DIR; then
+        log_info "  ⚠️  ${session} の session 環境から XDG_RUNTIME_DIR を外せなかった(pane 側の unset で代替する)"
+    fi
+}
+
+# shutsujin_pane_init_cmd <PS1文字列>
+# agent pane の shell へ送る初期化コマンドを返す。
+# ★unset は cd の成否に関わらず効かせるため、&& 連鎖の外に置く。
+shutsujin_pane_init_cmd() {
+    local prompt="$1"
+    printf '%s' "unset XDG_RUNTIME_DIR; cd \"$(pwd)\" && export PS1='${prompt}' && clear"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 出陣やり直し時の Claude 会話 resume (cmd_785・opt-in)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Remote Control 常時 ON では、出陣やり直しのたびに Claude 系 agent の数だけ
+# Claude アプリへ孤児セッションが残る。撤収の直前に各 agent の会話 ID を採取し、
+# 起動時に `claude --resume <id>` で同じ会話を再開すると、その会話の Remote
+# Control セッションへ再接続される(context/cmd_785_resume_poc.md)。
+#   - 有効化: config/settings.yaml の cli.claude_session_resume: true(既定は無効)
+#   - 採取は読み取りのみ。撤収前に /clear・/exit を送らない(cmd_754 裁定)。
+#   - 採取・照合に失敗した agent・Codex 系・--clean 時は従来の新規起動。
+#   - resume 起動が起動直後(30秒未満)に自ら非0で終わった時だけ、同じ打鍵の
+#     中で1回だけ従来の新規起動へ倒す(shutsujin_launch_cmd。G785-Q01)。
+#   - 有効時は Claude 系の起動コマンド(resume・新規・--clean・倒した先の新規の
+#     全て)の末尾に固定の1語を付ける(get_startup_prompt_arg。cmd_785 Phase 1b)。
+#     起動と同時に1件入力して転写を作り、次の出陣で resume できるようにする。
+# ─── 前回スナップショットの再利用(cmd_796・別 opt-in・既定 OFF) ───
+#   - 有効化: cli.claude_session_resume と cli.claude_session_resume_previous_snapshot
+#     の両方が true の時だけ(context/cmd_796_design_review.md)。
+#   - 今回の採取は *.current.yaml へ書き、同じ出陣の照合は current を読む。正本
+#     (claude_session_snapshot.yaml)は最後の実採取記録として残す(全対象が撤収前に
+#     確実に不在なら byte 単位で残し、稼働対象がいた時だけ今回の実採取で置換)。
+#   - 撤収前に確実に不在(absent)だった agent に限り、正本の ID を全条件で検査して
+#     候補にする。起動計画(plan)は出陣1回に固定し、ID・bridge の重複を拒否する。
+#   - 前回由来の起動だけ、pane が CLI を実行する直前に lib を --check-previous で
+#     呼んで再確認する(拒否なら新規起動を1回)。
+#   - resume 有効時は、採取の前から全 CLI の起動送出まで出陣を flock で排他する。
+#     2本目は撤収の前に止まる。lock の FD 9 は tmux server へ継承させない。
+CLAUDE_RESUME_SNAPSHOT_FILE="$SCRIPT_DIR/queue/state/claude_session_snapshot.yaml"
+CLAUDE_RESUME_CURRENT_FILE="$SCRIPT_DIR/queue/state/claude_session_snapshot.current.yaml"
+CLAUDE_RESUME_PLAN_FILE="$SCRIPT_DIR/queue/state/claude_session_plan.yaml"
+CLAUDE_RESUME_LOCK_FILE="$SCRIPT_DIR/queue/state/shutsujin.lock"
+CLAUDE_RESUME_RUN_TOKEN=""
+CLAUDE_RESUME_LOCK_HELD=false
+declare -A CLAUDE_RESUME_PLAN_SID=()
+declare -A CLAUDE_RESUME_PLAN_SOURCE=()
+CLAUDE_RESUME_PREV_REMAINING=0
+CLAUDE_RESUME_UNCONFIRMED=()
+
+# shutsujin_resume_lock — STEP 1(撤収)の前に一度だけ呼ぶ(cmd_796 §5.2-1)。
+# resume 有効時だけ、出陣全体を FD 9 の flock で排他する。取れなければ理由を出して
+# 1 を返す(呼ぶ側は撤収の前に終了する。新規で続行して他の出陣を壊さない)。
+# flock が無い環境では排他せずに続け、前回記録の再利用だけを無効にする。
+shutsujin_resume_lock() {
+    CLAUDE_RESUME_LOCK_HELD=false
+    [ "$CLAUDE_RESUME_LOADED" = true ] || return 0
+    claude_resume_enabled || return 0
+    if ! command -v flock >/dev/null 2>&1; then
+        log_info "  └─ ⚠️  会話resume: flock が無いため出陣の排他を取れない(前回記録の再利用は無効)"
+        return 0
+    fi
+    if ! mkdir -p "$(dirname "$CLAUDE_RESUME_LOCK_FILE")" || ! exec 9>>"$CLAUDE_RESUME_LOCK_FILE"; then
+        log_info "  └─ ⚠️  会話resume: 出陣の排他ファイルを開けない。撤収の前に中止する ($CLAUDE_RESUME_LOCK_FILE)"
+        return 1
+    fi
+    if ! flock -n 9; then
+        exec 9>&-
+        log_info "  └─ ⚠️  会話resume: 別の出陣が実行中(排他を取れない)。撤収の前に中止する"
+        return 1
+    fi
+    CLAUDE_RESUME_LOCK_HELD=true
+    return 0
+}
+
+# shutsujin_resume_unlock — 排他を解く(何度呼んでもよい)
+shutsujin_resume_unlock() {
+    [ "$CLAUDE_RESUME_LOCK_HELD" = true ] || return 0
+    exec 9>&-
+    CLAUDE_RESUME_LOCK_HELD=false
+    return 0
+}
+
+# shutsujin_claude_targets — この出陣で Claude として起動する役名(settings の CLI が claude)
+shutsujin_claude_targets() {
+    local a out=""
+    for a in shogun karo ${_ASHIGARU_IDS_STR:-} gunshi; do
+        [ "$(get_cli_type "$a" 2>/dev/null)" = "claude" ] && out="${out:+$out }$a"
+    done
+    printf '%s\n' "$out"
+}
+
+# shutsujin_claude_resume_snapshot — STEP 1 の kill-session の直前に一度だけ呼ぶ。
+# 撤収前の観測と今回の採取を current へ書き、起動計画を作ってから正本の保存方針を
+# 適用する(計画は正本を置換する前の内容を読む)。計画を作れた時だけ
+# CLAUDE_RESUME_RUN_TOKEN を立てる(同じ出陣で採った記録・この計画しか使わない)。
+shutsujin_claude_resume_snapshot() {
+    CLAUDE_RESUME_RUN_TOKEN=""
+    CLAUDE_RESUME_PLAN_SID=()
+    CLAUDE_RESUME_PLAN_SOURCE=()
+    CLAUDE_RESUME_PREV_REMAINING=0
+    CLAUDE_RESUME_UNCONFIRMED=()
+    [ "$CLAUDE_RESUME_LOADED" = true ] || return 0
+    if [ "$CLEAN_MODE" = true ]; then
+        # cmd_796 §4-6: --clean は resume のスイッチに関わらず、前回候補を次回へ持ち越さない
+        if [ -e "$CLAUDE_RESUME_SNAPSHOT_FILE" ]; then
+            if claude_resume_invalidate "$CLAUDE_RESUME_SNAPSHOT_FILE" clean; then
+                log_info "  └─ 会話resume: --clean のため前回の記録を無効化した"
+            else
+                log_info "  └─ ⚠️  会話resume: --clean だが前回の記録を無効化できなかった"
+            fi
+        fi
+        claude_resume_enabled && log_info "  └─ 会話resume: --clean のため採取しない(全agentを新規起動)"
+        return 0
+    fi
+    claude_resume_enabled || return 0
+
+    local token targets prev_on=0 plan_out commit kind agent source sid info
+    token=$(claude_resume_new_token)
+    targets=$(shutsujin_claude_targets)
+    if claude_resume_previous_enabled; then
+        if [ "$CLAUDE_RESUME_LOCK_HELD" = true ]; then
+            prev_on=1
+        else
+            log_info "  └─ ⚠️  会話resume: 出陣の排他が無いため前回記録の再利用はしない"
+        fi
+    fi
+    if ! claude_resume_snapshot "$CLAUDE_RESUME_CURRENT_FILE" "$token" "$targets"; then
+        log_info "  └─ ⚠️  会話resume: 採取に失敗(全agentを新規起動で続行)"
+        # 不在を証明できない: 正本を再利用不可にする(書けなければそのまま。今回は新規)
+        if [ -e "$CLAUDE_RESUME_SNAPSHOT_FILE" ]; then
+            claude_resume_invalidate "$CLAUDE_RESUME_SNAPSHOT_FILE" capture_failed \
+                || log_info "  └─ ⚠️  会話resume: 前回の記録も無効化できなかった(次回の前回再利用は鮮度・live 条件で判定)"
+        fi
+        return 0
+    fi
+    log_info "  └─ 会話resume: Claude系agentの会話IDを採取 → queue/state/claude_session_snapshot.current.yaml"
+
+    if plan_out=$(claude_resume_plan "$CLAUDE_RESUME_SNAPSHOT_FILE" "$CLAUDE_RESUME_CURRENT_FILE" \
+        "$CLAUDE_RESUME_PLAN_FILE" "$token" "$targets" "$(pwd)" "$prev_on"); then
+        while IFS=$'\t' read -r kind agent source sid info; do
+            [ "$kind" = "PLAN" ] || continue
+            [[ "$agent" =~ ^(shogun|karo|gunshi|ashigaru[0-9]+)$ ]] || continue
+            case "$source" in
+                current|previous_snapshot)
+                    claude_resume_valid_session_id "$sid" || continue
+                    CLAUDE_RESUME_PLAN_SOURCE["$agent"]="$source"
+                    CLAUDE_RESUME_PLAN_SID["$agent"]="$sid"
+                    if [ "$source" = "previous_snapshot" ]; then
+                        CLAUDE_RESUME_PREV_REMAINING=$((CLAUDE_RESUME_PREV_REMAINING + 1))
+                        log_info "  └─ 会話resume: ${agent} は前回記録の候補(${info})"
+                    fi
+                    ;;
+                *)
+                    [ "$prev_on" = 1 ] && log_info "  └─ 会話resume: ${agent} は前回記録を使わない(${info})"
+                    ;;
+            esac
+        done <<< "$plan_out"
+        CLAUDE_RESUME_RUN_TOKEN="$token"
+    else
+        log_info "  └─ ⚠️  会話resume: 起動計画を作れない(全agentを新規起動で続行)"
+    fi
+
+    # 正本の保存方針(計画が正本を読んだ後で適用する)
+    if commit=$(claude_resume_commit_canonical "$CLAUDE_RESUME_SNAPSHOT_FILE" "$CLAUDE_RESUME_CURRENT_FILE" "$targets"); then
+        case "$commit" in
+            preserved) log_info "  └─ 会話resume: 撤収前に対象が全て不在のため、前回の記録(正本)を残す" ;;
+            *) log_info "  └─ 会話resume: 今回の採取で記録(正本)を更新 → queue/state/claude_session_snapshot.yaml" ;;
+        esac
+    else
+        # cmd_796 §4-5: 正本の書込み自体に失敗した出陣は、全員新規へ倒す(計画を捨てる)
+        CLAUDE_RESUME_RUN_TOKEN=""
+        CLAUDE_RESUME_PLAN_SID=()
+        CLAUDE_RESUME_PLAN_SOURCE=()
+        CLAUDE_RESUME_PREV_REMAINING=0
+        log_info "  └─ ⚠️  会話resume: 記録(正本)を更新できないため、この出陣は全agentを新規起動で続行"
+    fi
+    return 0
+}
+
+# shutsujin_resume_id <agent_id> <cli_type>
+# この出陣の起動計画で、その agent に発行した会話 ID(current・前回由来)を返す。
+# 空なら従来の新規起動。計画は一度だけ作り、ここでは読むだけ(予約し直さない)。
+shutsujin_resume_id() {
+    [ -n "${CLAUDE_RESUME_RUN_TOKEN:-}" ] || return 0
+    [ "${2:-}" = "claude" ] || return 0
+    [ -n "${1:-}" ] || return 0
+    printf '%s\n' "${CLAUDE_RESUME_PLAN_SID[$1]:-}"
+}
+
+# shutsujin_wrap_resume_cmd <agent_id> <resume_id> <resume_cmd> <fresh_cmd>
+# resume する起動コマンドを包む。計画で前回由来の agent だけ、直前確認つきの1行
+# (claude_resume_previous_launch_cmd)にし、それ以外は従来の起動直後失敗の復旧経路
+# (claude_resume_launch_cmd)。
+shutsujin_wrap_resume_cmd() {
+    if [ -n "${CLAUDE_RESUME_RUN_TOKEN:-}" ] && [ -n "${1:-}" ] \
+        && [ "${CLAUDE_RESUME_PLAN_SOURCE[$1]:-}" = "previous_snapshot" ] \
+        && [ "${CLAUDE_RESUME_PLAN_SID[$1]:-}" = "${2:-}" ]; then
+        claude_resume_previous_launch_cmd "$CLAUDE_RESUME_PLAN_FILE" "$CLAUDE_RESUME_RUN_TOKEN" "$1" "$2" "$3" "$4"
+        return 0
+    fi
+    claude_resume_launch_cmd "$2" "$3" "$4"
+}
+
+# shutsujin_launch_cmd <agent_id> <resume_id>
+# build_cli_command の起動コマンドを返す。resume_id がある時は
+# shutsujin_wrap_resume_cmd で包み、`--resume` 起動が起動直後に失敗した時に限り
+# 同じ打鍵の中で1回だけ従来の新規起動へ倒す(cmd_785 G785-Q01)。
+# resume_id が空・ライブラリ未読込なら従来の build_cli_command そのもの。
+# 固定の1語(opt-in 時)は build_cli_command が resume・新規の両方の末尾へ同じ形で
+# 付けるので、ここでは足さない(cmd_785 Phase 1b)。
+shutsujin_launch_cmd() {
+    local fresh
+    fresh=$(build_cli_command "$1")
+    if [ -z "${2:-}" ] || ! declare -F claude_resume_launch_cmd >/dev/null 2>&1; then
+        printf '%s\n' "$fresh"
+        return 0
+    fi
+    shutsujin_wrap_resume_cmd "$1" "$2" "$(build_cli_command "$1" "$2")" "$fresh"
+}
+
+# shutsujin_log_resume <表示名> <resume_id> [agent_id]
+shutsujin_log_resume() {
+    if [ -n "${2:-}" ]; then
+        if [ -n "${3:-}" ] && [ "${CLAUDE_RESUME_PLAN_SOURCE[$3]:-}" = "previous_snapshot" ]; then
+            log_info "  └─ ${1}: 前回の記録から会話を再開(--resume ${2}。起動の直前に稼働状況を再確認し、拒否なら新規起動)"
+        else
+            log_info "  └─ ${1}: 前回の会話を再開(--resume ${2}。起動直後に失敗すれば1回だけ新規起動へ切替)"
+        fi
+    fi
+    return 0
+}
+
+# shutsujin_resume_settle <pane> <agent_id> <cli_type> <送出の rc>
+# 起動を送った直後に呼ぶ(cmd_796 §5.2-5)。前回由来の起動がまだ後に残っている間
+# (またはこの起動自身が前回由来の時)、送った claude の記録が出るまで有限時間だけ
+# 待つ。後続の直前確認が、起動直後で記録の無い claude を「判定不能」として拒否しない
+# ようにするため。前回由来の起動で記録を確かめられなければ「未確定」として残す。
+shutsujin_resume_settle() {
+    local pane="${1:-}" agent="${2:-}" cli="${3:-}" sent="${4:-1}" is_prev=false pane_pid
+    [ "${CLAUDE_RESUME_PREV_REMAINING:-0}" -gt 0 ] || return 0
+    [ "$cli" = "claude" ] || return 0
+    if [ -n "$agent" ] && [ "${CLAUDE_RESUME_PLAN_SOURCE[$agent]:-}" = "previous_snapshot" ]; then
+        is_prev=true
+        CLAUDE_RESUME_PREV_REMAINING=$((CLAUDE_RESUME_PREV_REMAINING - 1))
+    fi
+    # 送れなかった pane では何も起動していない(待たない・未確定にもしない)
+    [ "$sent" = 0 ] || return 0
+    if [ "$is_prev" = false ] && [ "$CLAUDE_RESUME_PREV_REMAINING" -le 0 ]; then
+        return 0
+    fi
+    pane_pid=$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null) || pane_pid=""
+    if claude_resume_wait_live_record "$pane_pid" "$agent" "$CLAUDE_RESUME_SETTLE_SEC" >/dev/null; then
+        return 0
+    fi
+    log_info "  └─ ⚠️  会話resume: ${agent} の起動後の記録を ${CLAUDE_RESUME_SETTLE_SEC} 秒以内に確かめられない"
+    [ "$is_prev" = true ] && CLAUDE_RESUME_UNCONFIRMED+=("$agent")
+    return 0
+}
+
+# shutsujin_resume_finalize — 全 CLI の起動送出の後に呼ぶ(何度呼んでもよい)。
+# 記録を確かめられなかった前回由来の起動を正本から外し(次の出陣が起動前の窓を
+# 不在として使わない)、出陣の排他を解く。
+shutsujin_resume_finalize() {
+    if [ "${#CLAUDE_RESUME_UNCONFIRMED[@]}" -gt 0 ]; then
+        if claude_resume_withdraw_previous "$CLAUDE_RESUME_SNAPSHOT_FILE" "${CLAUDE_RESUME_RUN_TOKEN:-none}" "${CLAUDE_RESUME_UNCONFIRMED[@]}"; then
+            log_info "  └─ 会話resume: 起動を確かめられなかった前回候補を記録から外した(${CLAUDE_RESUME_UNCONFIRMED[*]})"
+        else
+            log_info "  └─ ⚠️  会話resume: 起動を確かめられなかった前回候補を記録から外せなかった(${CLAUDE_RESUME_UNCONFIRMED[*]})"
+        fi
+        CLAUDE_RESUME_UNCONFIRMED=()
+    fi
+    shutsujin_resume_unlock
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -325,6 +771,12 @@ echo ""
 # STEP 1: 既存セッションクリーンアップ
 # ═══════════════════════════════════════════════════════════════════════════════
 log_info "🧹 既存の陣を撤収中..."
+# cmd_796: resume 有効時は出陣を排他する。取れなければ撤収の前に止まる(他の出陣を壊さない)。
+if ! shutsujin_resume_lock; then
+    exit 1
+fi
+# cmd_785: 撤収(kill-session)の直前に Claude 系 agent の会話 ID を採取する(opt-in)。
+shutsujin_claude_resume_snapshot || true
 tmux kill-session -t multiagent 2>/dev/null && log_info "  └─ multiagent陣、撤収完了" || log_info "  └─ multiagent陣は存在せず"
 tmux kill-session -t shogun 2>/dev/null && log_info "  └─ shogun本陣、撤収完了" || log_info "  └─ shogun本陣は存在せず"
 
@@ -365,12 +817,35 @@ fi
 # queue ディレクトリが存在しない場合は作成（初回起動時に必要）
 [ -d ./queue/reports ] || mkdir -p ./queue/reports
 [ -d ./queue/tasks ] || mkdir -p ./queue/tasks
+# queue/state はmesh登録確認(STEP 6.9)の書込み先。新規/clean環境では
+# 偶然にも存在しないことがあるため、他の2つと同じくここで保証する
+# (cmd_759 redo1 G759-STATE-DIR-03)。
+[ -d ./queue/state ] || mkdir -p ./queue/state
 # inbox はLinux FSにシンボリックリンク（WSL2の/mnt/c/ではinotifywaitが動かないため）
 # macOSではfswatch使用のためシンボリックリンク不要
 if [ "$(uname -s)" != "Darwin" ]; then
     INBOX_LINUX_DIR="$HOME/.local/share/multi-agent-shogun/inbox"
     if [ ! -L ./queue/inbox ]; then
         mkdir -p "$INBOX_LINUX_DIR"
+        # ★D002-E1個別記録(cmd_753完了処理redo2・汎用tagには混ぜない):
+        # 次行の`rm -rf ./queue/inbox`は、静的検査器
+        # (scripts/rm_rf_d002e1_checker.py)が汎用の'./'相対パスとして
+        # 「未証明・要人手確認」(FORMAT_ONLY)止まりに倒す対象であり、
+        # この分類器上の扱いは変更しない。
+        # ★以下は実装が無条件に保証する事実ではない。本ファイル16-17
+        # 行目は`BASH_SOURCE[0]`自身のsymlinkをreadlink/realpath等で
+        # 解決しておらず、repo外の起動用symlink経由で起動された場合は
+        # `SCRIPT_DIR`がリポジトリルートに固定される保証はない。また
+        # 本行直前のcheckは`./queue/inbox`自身がsymlinkでないことしか
+        # 検証しておらず、親component`./queue`自体が外部を指すsymlink
+        # でないことは検証していない。★「本行実行時点のCWDがリポジトリ
+        # ルートに固定されており、中間symlinkも経由していない」という
+        # のは、直接の標準起動であること・各中間componentが非symlink
+        # であることを、この行を書いた時点でレビュー時に別途確認して
+        # 初めて成立する条件付きの事実であり、実装自体がそれを恒常的に
+        # 保証しているわけではない(無条件に安全と言うには、本スクリプト
+        # 自身のsymlink解決と全中間componentのruntime保証、または
+        # 再帰削除を避ける設計が別途必要——本redoのscope外)。
         [ -d ./queue/inbox ] && cp ./queue/inbox/*.yaml "$INBOX_LINUX_DIR/" 2>/dev/null && rm -rf ./queue/inbox
         ln -sf "$INBOX_LINUX_DIR" ./queue/inbox
         log_info "  └─ inbox → Linux FS ($INBOX_LINUX_DIR) にシンボリックリンク作成"
@@ -538,8 +1013,10 @@ log_war "👑 将軍の本陣を構築中..."
 # shogun セッションがなければ作る（-s 時もここで必ず shogun が存在するようにする）
 # window 0 のみ作成し -n main で名前付け（第二 window にするとアタッチ時に空ペインが開くため 1 window に限定）
 if ! tmux has-session -t shogun 2>/dev/null; then
-    tmux new-session -d -s shogun -n main
+    # 9>&-: 出陣の排他(FD 9・cmd_796)を、ここで起動し得る tmux server へ継承させない
+    tmux new-session -d -s shogun -n main 9>&-
 fi
+shutsujin_detach_runtime_dir shogun
 
 # スマホ等の小画面クライアント対策: aggressive-resize + latest
 # css関数がスマホ用に専用ウィンドウを作るので、PCのウィンドウに干渉しない
@@ -548,7 +1025,7 @@ tmux set-option -g aggressive-resize on
 
 # 将軍ペインはウィンドウ名 "main" で指定（base-index 1 環境でも動く）
 SHOGUN_PROMPT=$(generate_prompt "将軍" "magenta" "$SHELL_SETTING")
-tmux send-keys -t shogun:main "cd \"$(pwd)\" && export PS1='${SHOGUN_PROMPT}' && clear" Enter
+shutsujin_send_launch shogun:main "将軍paneのPS1設定" "$(shutsujin_pane_init_cmd "$SHOGUN_PROMPT")" Enter || true
 tmux select-pane -t shogun:main -P 'bg=#002b36'  # 将軍の Solarized Dark
 tmux set-option -p -t shogun:main @agent_id "shogun"
 
@@ -563,8 +1040,8 @@ PANE_BASE=$(tmux show-options -gv pane-base-index 2>/dev/null || echo 0)
 # ═══════════════════════════════════════════════════════════════════════════════
 log_war "⚔️ 家老・足軽・軍師の陣を構築中（9名配備）..."
 
-# 最初のペイン作成
-if ! tmux new-session -d -s multiagent -n "agents" 2>/dev/null; then
+# 最初のペイン作成(9>&-: 出陣の排他の FD を tmux server へ継承させない。cmd_796)
+if ! tmux new-session -d -s multiagent -n "agents" 2>/dev/null 9>&-; then
     echo ""
     echo "  ╔════════════════════════════════════════════════════════════╗"
     echo "  ║  [ERROR] Failed to create tmux session 'multiagent'      ║"
@@ -579,6 +1056,8 @@ if ! tmux new-session -d -s multiagent -n "agents" 2>/dev/null; then
     echo ""
     exit 1
 fi
+# ★下の split-window より前に置く(分割で生まれる pane が除去印を継ぐため)
+shutsujin_detach_runtime_dir multiagent
 
 # DISPLAY_MODE: shout (default) or silent (--silent flag)
 if [ "$SILENT_MODE" = true ]; then
@@ -648,7 +1127,7 @@ for i in "${!AGENT_IDS[@]}"; do
     tmux set-option -p -t "multiagent:agents.${p}" @model_name "${MODEL_NAMES[$i]}"
     tmux set-option -p -t "multiagent:agents.${p}" @current_task ""
     PROMPT_STR=$(generate_prompt "${PANE_LABELS[$i]}" "${PANE_COLORS[$i]}" "$SHELL_SETTING")
-    tmux send-keys -t "multiagent:agents.${p}" "cd \"$(pwd)\" && export PS1='${PROMPT_STR}' && clear" Enter
+    shutsujin_send_launch "multiagent:agents.${p}" "${AGENT_IDS[$i]}paneのPS1設定" "$(shutsujin_pane_init_cmd "$PROMPT_STR")" Enter || true
 done
 
 # 家老・軍師ペインの背景色（足軽との視覚的区別）
@@ -690,10 +1169,12 @@ if [ "$SETUP_ONLY" = false ]; then
 
     # 将軍: CLI Adapter経由でコマンド構築
     _shogun_cli_type="claude"
-    _shogun_cmd="claude --model opus --effort max $PERMISSION_FLAG"
+    _shogun_cmd="claude --model opus --name shogun --effort max $PERMISSION_FLAG"
+    _shogun_resume=""
     if [ "$CLI_ADAPTER_LOADED" = true ]; then
         _shogun_cli_type=$(get_cli_type "shogun")
-        _shogun_cmd=$(build_cli_command "shogun")
+        _shogun_resume=$(shutsujin_resume_id "shogun" "$_shogun_cli_type")
+        _shogun_cmd=$(shutsujin_launch_cmd "shogun" "$_shogun_resume")
     fi
     # --shogun-no-thinking → settings.yaml の thinking を一時的に false にして build_cli_command に任せる
     if [ "$SHOGUN_NO_THINKING" = true ] && [ "$CLI_ADAPTER_LOADED" = true ]; then
@@ -704,12 +1185,15 @@ with open(f) as fh: d = yaml.safe_load(fh) or {}
 d.setdefault('cli',{}).setdefault('agents',{}).setdefault('shogun',{})['thinking'] = False
 with open(f,'w') as fh: yaml.safe_dump(d, fh, default_flow_style=False, allow_unicode=True, sort_keys=False)
 " 2>/dev/null
-        _shogun_cmd=$(build_cli_command "shogun")
+        _shogun_cmd=$(shutsujin_launch_cmd "shogun" "$_shogun_resume")
         log_info "  └─ 将軍 settings.yaml thinking=false に設定"
     fi
+    shutsujin_log_resume "将軍" "$_shogun_resume" shogun
     tmux set-option -p -t "shogun:main" @agent_cli "$_shogun_cli_type"
-    tmux send-keys -t shogun:main "$_shogun_cmd"
-    tmux send-keys -t shogun:main Enter
+    _launch_rc=0
+    shutsujin_send_launch shogun:main "将軍のCLI起動" "$_shogun_cmd" \
+        && shutsujin_send_launch shogun:main "将軍のCLI起動Enter" Enter || _launch_rc=1
+    shutsujin_resume_settle shogun:main shogun "$_shogun_cli_type" "$_launch_rc"
     opencode_startup_delay "$_shogun_cli_type"
     _shogun_display=$(get_model_display_name "shogun" 2>/dev/null || echo "Opus")
     tmux set-option -p -t "shogun:main" @model_name "$_shogun_display" 2>/dev/null || true
@@ -721,14 +1205,18 @@ with open(f,'w') as fh: yaml.safe_dump(d, fh, default_flow_style=False, allow_un
     # 家老（pane 0）: CLI Adapter経由でコマンド構築（デフォルト: Sonnet）
     p=$((PANE_BASE + 0))
     _karo_cli_type="claude"
-    _karo_cmd="claude --model sonnet --effort max $PERMISSION_FLAG"
+    _karo_cmd="claude --model sonnet --name karo --effort max $PERMISSION_FLAG"
     if [ "$CLI_ADAPTER_LOADED" = true ]; then
         _karo_cli_type=$(get_cli_type "karo")
-        _karo_cmd=$(build_cli_command "karo")
+        _karo_resume=$(shutsujin_resume_id "karo" "$_karo_cli_type")
+        _karo_cmd=$(shutsujin_launch_cmd "karo" "$_karo_resume")
+        shutsujin_log_resume "家老" "$_karo_resume" karo
     fi
     tmux set-option -p -t "multiagent:agents.${p}" @agent_cli "$_karo_cli_type"
-    tmux send-keys -t "multiagent:agents.${p}" "$_karo_cmd"
-    tmux send-keys -t "multiagent:agents.${p}" Enter
+    _launch_rc=0
+    shutsujin_send_launch "multiagent:agents.${p}" "家老のCLI起動" "$_karo_cmd" \
+        && shutsujin_send_launch "multiagent:agents.${p}" "家老のCLI起動Enter" Enter || _launch_rc=1
+    shutsujin_resume_settle "multiagent:agents.${p}" karo "$_karo_cli_type" "$_launch_rc"
     opencode_startup_delay "$_karo_cli_type"
     _karo_display=$(get_model_display_name "karo" 2>/dev/null || echo "Sonnet")
     tmux set-option -p -t "multiagent:agents.${p}" @model_name "$_karo_display" 2>/dev/null || true
@@ -739,18 +1227,32 @@ with open(f,'w') as fh: yaml.safe_dump(d, fh, default_flow_style=False, allow_un
         for i in $(seq 1 "$_ASHIGARU_COUNT"); do
             p=$((PANE_BASE + i))
             _ashi_cli_type="claude"
-            _ashi_cmd="claude --model opus --effort max $PERMISSION_FLAG"
+            _ashi_cmd="claude --model opus --name ashigaru${i} --effort max $PERMISSION_FLAG"
             if [ "$CLI_ADAPTER_LOADED" = true ]; then
                 _ashi_cli_type=$(get_cli_type "ashigaru${i}")
                 if [ "$_ashi_cli_type" = "claude" ]; then
-                    _ashi_cmd="claude --model opus --effort max $PERMISSION_FLAG"
+                    # cmd_785: 採取した会話IDは claude_resume_lookup が UUID 形式を検査済み。
+                    # resume する時は起動直後の失敗に限り1回だけ新規起動へ倒す形に包む。
+                    # resume 側は従来コマンドの claude の直後へ --resume を足して組む
+                    # (引数を書き写さない=同じ従来引数であることを構造で保つ)。
+                    _ashi_resume=$(shutsujin_resume_id "ashigaru${i}" "$_ashi_cli_type")
+                    _ashi_cmd="claude --model opus --name ashigaru${i} --effort max $PERMISSION_FLAG"
+                    _ashi_prompt=$(get_startup_prompt_arg "ashigaru${i}")  # cmd_785 Phase 1b: opt-in 時の固定の1語(build_cli_command と同じ)
+                    _ashi_cmd="${_ashi_cmd}${_ashi_prompt:+ $_ashi_prompt}"  # resume 側はこの _ashi_cmd から組む=resume・新規に1回ずつ
+                    if [ -n "$_ashi_resume" ]; then
+                        _ashi_cmd=$(shutsujin_wrap_resume_cmd "ashigaru${i}" "$_ashi_resume" \
+                            "claude --resume ${_ashi_resume}${_ashi_cmd#claude}" "$_ashi_cmd")
+                    fi
+                    shutsujin_log_resume "足軽${i}" "$_ashi_resume" "ashigaru${i}"
                 else
                     _ashi_cmd=$(build_cli_command "ashigaru${i}")
                 fi
             fi
             tmux set-option -p -t "multiagent:agents.${p}" @agent_cli "$_ashi_cli_type"
-            tmux send-keys -t "multiagent:agents.${p}" "$_ashi_cmd"
-            tmux send-keys -t "multiagent:agents.${p}" Enter
+            _launch_rc=0
+            shutsujin_send_launch "multiagent:agents.${p}" "足軽${i}のCLI起動" "$_ashi_cmd" \
+                && shutsujin_send_launch "multiagent:agents.${p}" "足軽${i}のCLI起動Enter" Enter || _launch_rc=1
+            shutsujin_resume_settle "multiagent:agents.${p}" "ashigaru${i}" "$_ashi_cli_type" "$_launch_rc"
             opencode_startup_delay "$_ashi_cli_type"
         done
         log_info "  └─ 足軽1-${_ASHIGARU_COUNT}（決戦の陣）、召喚完了"
@@ -759,14 +1261,18 @@ with open(f,'w') as fh: yaml.safe_dump(d, fh, default_flow_style=False, allow_un
         for i in $(seq 1 "$_ASHIGARU_COUNT"); do
             p=$((PANE_BASE + i))
             _ashi_cli_type="claude"
-            _ashi_cmd="claude --model sonnet --effort max $PERMISSION_FLAG"
+            _ashi_cmd="claude --model sonnet --name ashigaru${i} --effort max $PERMISSION_FLAG"
             if [ "$CLI_ADAPTER_LOADED" = true ]; then
                 _ashi_cli_type=$(get_cli_type "ashigaru${i}")
-                _ashi_cmd=$(build_cli_command "ashigaru${i}")
+                _ashi_resume=$(shutsujin_resume_id "ashigaru${i}" "$_ashi_cli_type")
+                _ashi_cmd=$(shutsujin_launch_cmd "ashigaru${i}" "$_ashi_resume")
+                shutsujin_log_resume "足軽${i}" "$_ashi_resume" "ashigaru${i}"
             fi
             tmux set-option -p -t "multiagent:agents.${p}" @agent_cli "$_ashi_cli_type"
-            tmux send-keys -t "multiagent:agents.${p}" "$_ashi_cmd"
-            tmux send-keys -t "multiagent:agents.${p}" Enter
+            _launch_rc=0
+            shutsujin_send_launch "multiagent:agents.${p}" "足軽${i}のCLI起動" "$_ashi_cmd" \
+                && shutsujin_send_launch "multiagent:agents.${p}" "足軽${i}のCLI起動Enter" Enter || _launch_rc=1
+            shutsujin_resume_settle "multiagent:agents.${p}" "ashigaru${i}" "$_ashi_cli_type" "$_launch_rc"
             opencode_startup_delay "$_ashi_cli_type"
         done
         log_info "  └─ 足軽1-${_ASHIGARU_COUNT}（平時の陣）、召喚完了"
@@ -775,14 +1281,18 @@ with open(f,'w') as fh: yaml.safe_dump(d, fh, default_flow_style=False, allow_un
     # 軍師（pane _ASHIGARU_COUNT+1）: Opus Thinking — 戦略立案・設計判断専任
     p=$((PANE_BASE + _ASHIGARU_COUNT + 1))
     _gunshi_cli_type="claude"
-    _gunshi_cmd="claude --model opus --effort max $PERMISSION_FLAG"
+    _gunshi_cmd="claude --model opus --name gunshi --effort max $PERMISSION_FLAG"
     if [ "$CLI_ADAPTER_LOADED" = true ]; then
         _gunshi_cli_type=$(get_cli_type "gunshi")
-        _gunshi_cmd=$(build_cli_command "gunshi")
+        _gunshi_resume=$(shutsujin_resume_id "gunshi" "$_gunshi_cli_type")
+        _gunshi_cmd=$(shutsujin_launch_cmd "gunshi" "$_gunshi_resume")
+        shutsujin_log_resume "軍師" "$_gunshi_resume" gunshi
     fi
     tmux set-option -p -t "multiagent:agents.${p}" @agent_cli "$_gunshi_cli_type"
-    tmux send-keys -t "multiagent:agents.${p}" "$_gunshi_cmd"
-    tmux send-keys -t "multiagent:agents.${p}" Enter
+    _launch_rc=0
+    shutsujin_send_launch "multiagent:agents.${p}" "軍師のCLI起動" "$_gunshi_cmd" \
+        && shutsujin_send_launch "multiagent:agents.${p}" "軍師のCLI起動Enter" Enter || _launch_rc=1
+    shutsujin_resume_settle "multiagent:agents.${p}" gunshi "$_gunshi_cli_type" "$_launch_rc"
     opencode_startup_delay "$_gunshi_cli_type"
     _gunshi_display=$(get_model_display_name "gunshi" 2>/dev/null || echo "Opus+T")
     tmux set-option -p -t "multiagent:agents.${p}" @model_name "$_gunshi_display" 2>/dev/null || true
@@ -794,6 +1304,10 @@ with open(f,'w') as fh: yaml.safe_dump(d, fh, default_flow_style=False, allow_un
         log_success "✅ 平時の陣で出陣（家老=Sonnet, 足軽=Sonnet, 軍師=Opus）"
     fi
     echo ""
+
+    # cmd_796: 全 CLI の起動送出が済んだ。記録を確かめられなかった前回候補を正本から外し、
+    # 出陣の排他を解く(この後に起動する inbox_watcher 等へ FD 9 を継承させない)。
+    shutsujin_resume_finalize
 
     # ═══════════════════════════════════════════════════════════════════════════
     # STEP 6.5: 各エージェントに指示書を読み込ませる
@@ -930,7 +1444,28 @@ NINJA_EOF
     # 自分のinstructions/*.mdを読み込む。検証済み (2026-02-08)。
     log_info "📜 指示書読み込みは各エージェントが自律実行（CLAUDE.md Session Start）"
     echo ""
+
+    # ═══════════════════════════════════════════════════════════════════
+    # STEP 6.9: mesh登録preflight（cmd_759 A-3・read-only）
+    # ═══════════════════════════════════════════════════════════════════
+    # ★ここまでで将軍起動待ち（最大30秒・上記）とinbox_watcher起動が既に
+    #   実時間を消費している。mesh登録（本体の置場規則による cc-socks 配下の
+    #   socket。上記 shutsujin_pane_init_cmd により既定では /tmp/cc-socks/）は
+    #   起動直後は未完了のことがある実測があるため（docs/delivery_channels.md
+    #   参照）、新たなsleep/pollingループは追加せず、ここまでの自然な経過
+    #   時間の後に一度だけ確認する（CLAUDE.md/cmd_759 A-3「固定sleepでの
+    #   ポーリングループ化は避け一回性の確認に留める」に従う）。
+    # ★未登録paneがあっても、対象peerへの入力送信・再起動は行わない
+    #   (pane観測はread-only)。ただしstate永続化とKaro inboxへの
+    #   delivery_alert通知(shutsujin_mesh_check内・下記参照)は行う。
+    if [ "$MESH_CHECK_LOADED" = true ]; then
+        log_info "🔌 mesh登録を確認中（read-only）..."
+        shutsujin_mesh_check
+        echo ""
+    fi
 fi
+# cmd_796: -s(起動なし)でも、常駐プロセス(ntfy リスナー等)を起こす前に出陣の排他を解く
+shutsujin_resume_finalize
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 6.7.5: ntfy_inbox 古メッセージ退避（7日より前のprocessed分をアーカイブ）
@@ -1073,6 +1608,22 @@ echo "  │  ※ 各エージェントは指示書を読み込み済み。      
 echo "  │    すぐに命令を開始できます。                             │"
 echo "  └──────────────────────────────────────────────────────────┘"
 echo ""
+
+# ★起動打鍵を送らなかった pane を人へ報せる (cmd_754 E-3/E-5)。
+#   黙って落とさない。人が見て手を打つための出口である。
+if [ -n "$SHUTSUJIN_SKIPPED_PANES" ]; then
+    echo "  ╔══════════════════════════════════════════════════════════╗"
+    echo "  ║  🚨 起動打鍵を送らなかった pane がござる                  ║"
+    echo "  ╚══════════════════════════════════════════════════════════╝"
+    echo -e "$SHUTSUJIN_SKIPPED_PANES" | sed '/^$/d' | sed 's/^/     - /'
+    echo ""
+    echo "  ★これらの pane は素のシェルではなかった(既に CLI が動いている等)。"
+    echo "    cmd_754 の裁定により、稼働中の pane へは打鍵せぬ。"
+    echo "    既に望みの CLI が動いておるならそのままでよい。差し替えるなら"
+    echo "    当該 pane を人が確認し、手ずから /exit してから再度出陣せよ。"
+    echo ""
+fi
+
 echo "  ════════════════════════════════════════════════════════════"
 echo "   天下布武！勝利を掴め！ (Tenka Fubu! Seize victory!)"
 echo "  ════════════════════════════════════════════════════════════"

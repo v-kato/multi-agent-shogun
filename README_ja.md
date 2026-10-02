@@ -129,9 +129,9 @@ bash shutsujin_departure.sh                # 全エージェント起動
 
 | CLI | 特徴 | デフォルトモデル |
 |-----|------|-----------------|
-| **Claude Code** | tmux統合の実績、Memory MCP、専用ファイルツール（Read/Write/Edit/Glob/Grep） | Claude Sonnet 4.6 |
-| **OpenAI Codex** | サンドボックス実行、JSONL構造化出力、`codex exec` ヘッドレスモード | gpt-5.3-codex |
-| **GitHub Copilot** | GitHub MCP組込、4種の特化エージェント（Explore/Task/Plan/Code-review）、`/delegate` | Claude Sonnet 4.6 |
+| **Claude Code** | tmux統合の実績、Memory MCP、専用ファイルツール（Read/Write/Edit/Glob/Grep） | Claude Sonnet（`sonnet`別名） |
+| **OpenAI Codex** | サンドボックス実行、JSONL構造化出力、`codex exec` ヘッドレスモード | gpt-6-sol / gpt-6-luna |
+| **GitHub Copilot** | GitHub MCP組込、4種の特化エージェント（Explore/Task/Plan/Code-review）、`/delegate` | Claude Sonnet（`sonnet`別名） |
 | **Kimi Code** | 無料プランあり、多言語サポート | Kimi k2 |
 | **OpenCode** | `AGENTS.md` 自動読込、`--agent` による個体別エージェント定義、`/new` でのコンテキストリセット、モデル変更は再起動のみ、決定的な対話型 TUI 起動、`--model provider/model` ルーティング | provider/model |
 
@@ -465,6 +465,7 @@ wsl --install
 - ✅ CLIごとの指示書または生成済みエージェント定義を自動読み込み
 - ✅ キューファイルをリセットして新しい状態に
 - ✅ ntfyリスナーを起動してスマホ通知を有効化（設定済みの場合）
+- ✅ （opt-in）Claude系エージェントの前回の会話を再開し、Remote Controlセッションを孤児にせず継続
 
 **実行後、全エージェントが即座にコマンドを受け付ける準備完了！**
 
@@ -595,10 +596,10 @@ cli:
   agents:
     ashigaru1:
       type: codex          # codex / claude / copilot / kimi / opencode
-      model: gpt-5.5
+      model: gpt-6-luna
     ashigaru2:
       type: claude
-      model: claude-sonnet-4-6
+      model: sonnet         # 別名 — latestに追従(2026-09-29時点でSonnet 5.5)
     # ashigaru3-7, gunshi, karo も同様
 ```
 
@@ -625,9 +626,12 @@ OpenCode 選択時は `lib/cli_adapter.sh` が `--agent <agent_id>` と、リポ
 途中で切り替えたい場合は `scripts/switch_cli.sh` を使います：
 
 ```bash
-bash scripts/switch_cli.sh ashigaru3 --type claude --model claude-sonnet-4-6
-bash scripts/switch_cli.sh ashigaru3 --type opencode --model openrouter/openai/gpt-4o-mini
-bash scripts/switch_cli.sh ashigaru3 --type opencode --model openrouter/minimax/minimax-m2.5 --variant xhigh
+# ★--human-initiated は必須である (cmd_754)。本スクリプトは agent CLI が動いて
+# いる pane へ打ち込むため、「人が今この切替を命じ、当該paneを見ている」ことを
+# 明示しない限り1打鍵も送らない。自動経路は決して付けてはならぬ。
+bash scripts/switch_cli.sh ashigaru3 --human-initiated --type claude --model sonnet
+bash scripts/switch_cli.sh ashigaru3 --human-initiated --type opencode --model openrouter/openai/gpt-4o-mini
+bash scripts/switch_cli.sh ashigaru3 --human-initiated --type opencode --model openrouter/minimax/minimax-m2.5 --variant xhigh
 ```
 
 #### 4. 案件の切り替え／クローズ
@@ -733,10 +737,10 @@ Step 1: メッセージを書く            Step 2: エージェントを起こ�
 │ ashigaru3.yaml に    │──変更────▶│ (inotifywait、ポーリング │
 │ flock付きで書き込み  │           │  ではなくカーネルイベント)│
 └──────────────────────┘           │                          │
-                                   │ 起床方法:                │
-                                   │  1. 自己監視（スキップ） │
-                                   │  2. tmux send-keys       │
-                                   │    （短いnudgeのみ）     │
+                                   │ 配送を担うもの:          │
+                                   │  Claude → Stop hook      │
+                                   │  それ以外 → 人経路       │
+                                   │  （打鍵は無し。cmd_754） │
                                    └──────────────────────────┘
 
 Step 3: エージェントが自分のinboxを読む
@@ -748,45 +752,44 @@ Step 3: エージェントが自分のinboxを読む
 └──────────────────────────────────┘
 ```
 
-**起床の仕組み:**
+**起床の仕組み（cmd_754 で全面改訂 — 自動打鍵は廃止した）:**
 
-| 優先順位 | 方式 | 何が起きるか | いつ使われるか |
-|----------|------|-------------|---------------|
-| 1番 | **自己監視** | エージェントが自分のinboxファイルを監視 — 自力で起床、nudge不要 | エージェント自身が `inotifywait` を実行中 |
-| 2番 | **Stop Hook** | Claude Codeエージェントがターン終了時にinboxをチェック（`.claude/settings.json` Stop hook経由） | Claude Codeエージェントのみ |
-| 3番 | **tmux send-keys** | `tmux send-keys` で短いnudgeを送信（テキストとEnterを分離送信、Codex CLI対応） | フォールバック — ASW Phase 2以上では無効 |
+2026-09-08、起床通知(nudge)の `Enter` が権限確認モーダルの既定選択肢
+`❯ 1. Yes` を選び、そのメッセージがまさに禁じていた削除が実行された。
+以後4世代にわたり「画面から打鍵の安全を証明する」試みを重ねたが、4度とも
+破れた。★裁定は「稼働中の agent CLI へ打鍵してよいと画面から証明できる状態の
+集合は**空**である」。自動 `tmux send-keys` は全廃し、
+`scripts/inbox_watcher.sh` の `tmux send-keys` は**0件**である。
 
-**Agent Self-Watch (ASW) フェーズ** — `tmux send-keys` nudgeの使用をどこまで抑制するかを制御:
+| CLI | Stop hook | agent self-watch | 実際に配送を担うもの |
+|-----|-----------|------------------|----------------------|
+| claude | ○ 実在（登録・稼働確認済） | **✕ 実在せぬ** | Stop hook のみ（下記の窓の内側だけ） |
+| codex / opencode / copilot / kimi | ✕ 無い | **✕ 実在せぬ** | **無い → 人経路** |
 
-| ASWフェーズ | nudge動作 | 配信方式 | 推奨場面 |
-|------------|----------|---------|---------|
-| **Phase 1** | 通常nudge有効 | self-watch + send-keys | 初期セットアップ、混在CLI環境 |
-| **Phase 2** | **busy→抑止、idle→nudge** | busy: stop hookがターン終了時に配信。idle: nudge（不可避） | Claude Codeエージェント＋stop hook環境（推奨） |
-| **Phase 3** | `FINAL_ESCALATION_ONLY` | 最終リカバリ時のみsend-keys | 完全に安定した環境 |
+- **self-watch は実在しない。** `pgrep -f inotifywait` で見えるプロセスは全て
+  `inbox_watcher.sh` 自身の監視ループの子であり、agent が自ら張る watch は
+  1本も無い。よって配送経路として数えない。
+- **Stop hook の被覆には窓がある。** ターン終了時に発火し、未読が無ければ最大
+  55秒だけ待って終了する（hook の timeout が 60 秒であるため）。その窓を過ぎて
+  長く idle になった agent へは、本人が次のターンを始めるまで届かない。
+- **届かぬものは人へ倒す。** より強い打鍵へは決して倒さない。2分の猶予の後に
+  未配送として数え、閾値を超えたら家老 inbox へ通知（→ `dashboard.md` 🚨要対応）。
+  家老・将軍自身が滞留している場合は `scripts/ntfy.sh` で殿へ直接お報せする。
 
-Phase 2はidleフラグファイル（`/tmp/shogun_idle_{agent}`）でbusy/idle状態を判定する。Stop hookがターン境界でフラグを作成/削除する。作業中のnudge割り込みを排除しつつ、idle時の起床は維持する。
+特殊命令（`clear_command` / `model_switch` / `cli_restart`）は**未読のまま保持**し、
+人が打つべきコマンドを添えて上げる。送っていない命令を既読にすることは、
+命令を消すことだからである。
 
-> **なぜnudge完全撲滅できないのか？** Claude CodeのStop hookはターン終了時にしか発火しない。idleのエージェント（プロンプトで待機中）はターンが終了しないため、inboxチェックを発火させるhookがない。将来 `Notification` hookの `idle_prompt` タイプがブロック対応になるか、定期タイマーhookが追加されれば解決可能。
+`ASW_PHASE` は互換のため残るが、Phase 2/3 は nudge の量を加減する旗であった。
+nudge が消えた今、実装は常に Phase 3 より先（打鍵ゼロ）に在る。
 
-`config/settings.yaml` で設定:
-```yaml
-asw_phase: 2   # Claude Code環境では推奨
-```
-
-または `scripts/inbox_watcher.sh` の `ASW_PHASE` 変数を直接変更。変更後はinbox_watcherプロセスの再起動が必要。
-
-**3段階エスカレーション（v3.2）** — エージェントが応答しない場合:
-
-| フェーズ | タイミング | アクション |
-|---------|----------|-----------|
-| Phase 1 | 0-2分 | 標準nudge（`inbox3` テキスト + Enter） — *ASW Phase 2以上ではbusyエージェントはスキップ* |
-| Phase 2 | 2-4分 | Copilot/Kimi: Escape×2 + 1回の Ctrl-C + nudge。Claude/Codex/OpenCode: 通常nudgeへフォールバック |
-| Phase 3 | 4分以上 | CLI別のコンテキストリセットを送信。Claude/Copilot/Kimi は `/clear`、Codex/OpenCode は `/new`（5分間に最大1回） |
+失われた機能を含む詳細: **`docs/delivery_channels.md`**
 
 **設計のポイント:**
-- **メッセージ内容はtmuxを経由しない** — 送るのは短い「メールが届いたよ」の通知だけ。中身はエージェントが自分でファイルを読む。これにより文字化けや配信ハングを根絶。
-- **待機中のCPU使用率ゼロ** — `inotifywait` はカーネルイベントでブロック（ポーリングループではない）。メッセージ間のCPUは0%。
-- **配信保証** — ファイル書き込みが成功すれば、メッセージは確実にそこにある。消失なし、リトライ不要。
+- **メッセージ内容はtmuxを経由しない** — 中身はエージェントが自分でファイルを読む。
+- **待機中のCPU使用率ゼロ** — `inotifywait` はカーネルイベントでブロックする。
+- **永続性の保証** — ファイル書き込みが成功すれば、メッセージは確実にそこにある。
+- **見える失敗を選ぶ** — 止まっている agent は見える。誤って押された釦は見えない。
 
 ### 📊 5. エージェント稼働確認
 
@@ -1147,10 +1150,12 @@ SayTaskは個人の生産性を担当（キャプチャ → スケジュール �
 
 | エージェント | モデル | 思考モード | 役割 |
 |-------------|--------|----------|------|
-| 将軍 | Opus | **有効（high）** | 殿の参謀。`--shogun-no-thinking` で中継専用モードに |
-| 家老 | Sonnet | 有効 | タスク分配・簡易QC・ダッシュボード管理 |
-| 軍師 | Opus | 有効 | 深い分析・設計レビュー・アーキテクチャ評価 |
-| 足軽1-7 | Sonnet 4.6 | 有効 | 実装：コード・リサーチ・ファイル操作 |
+| 将軍 | Fable（`fable`別名） | **有効（high）** | 殿の参謀。`--shogun-no-thinking` で中継専用モードに |
+| 家老 | Sonnet（`sonnet`別名） | 有効 | タスク分配・簡易QC・ダッシュボード管理 |
+| 軍師 | Codex `gpt-6-sol` | 有効 | 深い分析・設計レビュー・アーキテクチャ評価 |
+| 足軽3-6 | Sonnet（`sonnet --effort xhigh`） | 有効 | 実装：コード・リサーチ・ファイル操作 |
+| 足軽7 | Opus（`opus --effort xhigh`） | 有効 | 実装：最高難度ワーカー |
+| 足軽1-2 | Codex `gpt-6-luna`（フォールバック: `gpt-reserve`） | 有効 | 実装：コード・リサーチ・ファイル操作 |
 
 **Thinking制御**: `config/settings.yaml` でエージェントごとに `thinking: true/false` を設定可能。`thinking: false` の場合、`MAX_THINKING_TOKENS=0` で起動しExtended Thinkingを無効化。ペインボーダーにはThinking有効時に `+T` サフィックスが表示される（例: `Sonnet+T`、`Opus+T`）。
 
@@ -1193,16 +1198,16 @@ task:
 
 ```yaml
 capability_tiers:
-  gpt-5.3-codex-spark:
+  gpt-6-luna:
     max_bloom: 3       # L1–L3: 高速・大量処理タスク
     cost_group: chatgpt_pro
-  gpt-5.3-codex:
+  gpt-6-sol:
     max_bloom: 4       # L1–L4: + 分析・デバッグ
     cost_group: chatgpt_pro
-  claude-sonnet-4-6:
+  sonnet:
     max_bloom: 5       # L1–L5: + 設計評価
     cost_group: claude_max
-  claude-opus-4-6:
+  opus:
     max_bloom: 6       # L1–L6: + 新規アーキテクチャ・戦略
     cost_group: claude_max
 ```
@@ -1460,6 +1465,47 @@ cp config/ntfy_auth.env.sample config/ntfy_auth.env
 
 `config/ntfy_auth.env` はgit追跡対象外です。詳細は `config/ntfy_auth.env.sample` を参照。
 
+### 出陣やり直し時のClaude会話再開（Remote Control）
+
+Claude Code の Remote Control を全セッションで常時ONにしていると、従来は `shutsujin_departure.sh` を実行するたびに Claude系エージェントの数だけ Claudeアプリの Codeタブへ新しい項目が増え、前回の項目は孤児として残りました。この opt-in を有効にすると、出陣は旧セッションを撤収する直前に各Claude系エージェントの会話IDを記録し、`claude --resume <sessionId>` で起動し直します。Claude Code はその会話に記録された Remote Control セッションへ再接続するため、同じ項目がオンラインに戻ります。
+
+```yaml
+# config/settings.yaml
+cli:
+  claude_session_resume: true   # 既定は無効（キー未記載）
+```
+
+- 会話IDは `tmux kill-session` の直前に読み取りだけで記録します。今回の採取は `queue/state/claude_session_snapshot.current.yaml` へ書き、`queue/state/claude_session_snapshot.yaml` は最後の実採取記録として残します（撤収前に全Claude系エージェントが確実に不在だった時はそのまま残し、それ以外は今回の採取で置き換えます）。稼働中のペインには何も打鍵しません。
+- IDを確かめられないエージェントは従来どおり新規起動します（記録なし・転写なし・`--clean` 指定・出陣セッションなし〈PC再起動後など。下の別opt-inを有効にした時を除く〉・Claude以外のCLI）。出陣は止まりません。
+- それでも `--resume` での起動が起動直後（30秒未満）に自らエラー終了した場合は、同じペインで1回だけ従来の新規起動へ切り替えます（起動時の打鍵は従来どおり1回で、その1行に組み込まれています）。30秒以上動いた後の終了・正常終了（rc=0）・シグナルによる終了では切り替えず、新規起動が再び失敗しても繰り返しません。30秒は単調時計（`/proc/uptime`）で測るため、時刻合わせで現実時計が巻き戻っても判定は変わりません。`/proc/uptime` を読めない環境（macOS など）では切り替えず、理由を標準エラー出力に出します。
+- 有効化後の1回目の出陣では各エージェント1件ずつ新しい項目ができ、2回目以降は同じ項目が継続します。
+- この opt-in を有効にすると、Claude系の起動（resume・新規の両方。`--clean` 指定時や上記の切替後の新規起動も含む）の末尾に、固定の1語の初期プロンプト `run-session-start-procedure` が付きます。Claude は最初の入力を受けるまで会話の転写を作らず、転写の無い会話は次の出陣で再開できません。この1語で起動と同時に転写を作り、通常の Session Start 手順を始めさせます。別の権限やタスクは与えません。Codex など Claude 以外のCLIは変わりません。あわせて SessionStart hook の出力の末尾に、呼ばれるたびに変わる1行（起動時刻）を足したため、resume のたびにも手順が注入されます。
+- 一度も入力を受けずに撤収されたエージェントは転写が無いため、次の出陣ではまだ1回新規起動になります（新しい項目が1件増える「種まき回」）。その次の出陣から他と同じく再開でき、新しい項目0件はその回で確かめてください。
+- アプリでアーカイブするのは本当の孤児だけにしてください。稼働中エージェントの項目は、次のresumeでアーカイブが解除されて戻ります。
+- 再接続に失敗すると「Previous session is unavailable」と表示され、エージェントはRemote Controlなしでローカルに動き続けます。
+- エージェント内で `/remote-control` を切り替えないでください。再接続のたびに新しい項目ができます。
+- 手動で再開するときは名前ではなくID（`claude --resume <sessionId>`）を指定してください。`/clear` が名前を引き継ぐため同名の会話が複数あるのが普通で、名前指定では選択画面（picker）が開きます。
+
+#### WSL再起動・クラッシュ後の前回スナップショットの再利用（別opt-in）
+
+WSL再起動やクラッシュの後は、撤収前に記録する相手（稼働中のClaude）がいないため、従来は全Claude系エージェントが新規起動し、項目が孤児として残りました。もう1つのスイッチを有効にすると、最後の実採取記録のIDを、厳しい条件を満たす時だけ再利用します。
+
+```yaml
+# config/settings.yaml
+cli:
+  claude_session_resume: true
+  claude_session_resume_previous_snapshot: true   # 既定は無効。上のスイッチと両方が真の時だけ働く
+```
+
+- 対象は撤収前に確実に不在だったエージェントだけです。tmux が server・セッションが無いと明言した（またはペインが素のシェル）**うえで**、`/proc` の観測でその役名のClaudeプロセスがいないことを確かめます。「読めなかった」を「いなかった」とは扱わず（子プロセスの探索が何も出さずに失敗した時も「読めなかった」です）、同じユーザーの生存Claudeに記録を検証できないものが1つでもあれば、その出陣ではこの経路を閉じます。
+- エージェントごとに、記録のIDが今回の対象一覧の同じ役名（1回だけ）のもので、今回の起動ディレクトリのproject dirに空でなく壊れていない転写があり、転写の最後のRemote Control bridgeが記録と同じで、記録・転写とも7日以内で、生存プロセスがそのID・bridge・役名を使っていない時だけ使います。満たさなければそのエージェントは新規起動し、理由をログに残します。
+- 年齢は、同じbootなら単調時計（`/proc/uptime`）、再起動を跨ぐ時や旧形式の記録ならtimezone付きの現実時計で測ります。未来の時刻は拒否し、転写が新しくても記録の7日は延ばしません。
+- 起動計画（`queue/state/claude_session_plan.yaml`）は出陣1回につき1回だけ作り、エージェント間のID・bridgeの重複を拒否します。再利用する起動だけ、ペインが起動する直前に `lib/claude_session_resume.sh --check-previous` で再確認し、ID・bridge・役名が使われていれば新規起動を1回だけ行います。出陣は `flock`（`queue/state/shutsujin.lock`）で排他し、同時に実行した2本目は撤収の前に止まります。
+- `--clean` は（resumeが無効でも）記録を無効化するため、クリーンスタートの後に古い会話を復活させません。
+- Linux専用（`/proc`・`flock`）です。それ以外では働かず、通常のresumeは従来どおり動きます。同じIDを人が同時に手で起動する競合までは防げないので、それはしないでください。実際のWSL再起動の後に同じbridgeへ戻ることは、アプリでの目視確認が要ります。
+
+詳細: [docs/claude_session_resume.md](docs/claude_session_resume.md) の 8
+
 ---
 
 ## 🛠️ 上級者向け
@@ -1613,6 +1659,7 @@ multi-agent-shogun/
 │
 ├── lib/
 │   ├── agent_status.sh       # 共有 稼働/待機 判定（Claude Code + Codex + OpenCode）
+│   ├── claude_session_resume.sh # opt-in: 出陣やり直し時のClaude会話再開（Remote Control継続）
 │   ├── cli_adapter.sh        # Multi-CLIアダプタ（Claude/Codex/Copilot/Kimi/OpenCode）
 │   └── ntfy_auth.sh          # ntfy認証ヘルパー
 │
@@ -1781,10 +1828,10 @@ tmux attach-session -t multiagent
 
 ```bash
 # 方法1: ペイン内でclaudeを直接実行
-claude --model opus --dangerously-skip-permissions
+claude --model fable --dangerously-skip-permissions
 
 # 方法2: 家老がrespawn-paneで強制再起動（ネストも解消される）
-tmux respawn-pane -t shogun:0.0 -k 'claude --model opus --dangerously-skip-permissions'
+tmux respawn-pane -t shogun:0.0 -k 'claude --model fable --dangerously-skip-permissions'
 ```
 
 **誤ってtmuxをネストしてしまった場合：**

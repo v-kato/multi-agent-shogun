@@ -359,7 +359,7 @@ No `/model` command for runtime model switching. Model is fixed at launch.
 | Memory MCP | Built-in | Not built-in (configurable) | Recovery relies on AGENTS.md + files |
 | Task tool (subagents) | External (tmux-based) | Native (in-process swarm) | Kimi advantage for sub-delegation |
 | Skill system | Skill tool | `/skill:` + `/flow:` | Kimi flow skills more advanced |
-| Dynamic model switch | `/model` via send-keys | Not available in-session | Fixed at launch |
+| Dynamic model switch | 人手で `switch_cli.sh --human-initiated`(★cli_restartの自動委譲はcmd_760 A-4で撤去済み) | Not available in-session | Fixed at launch |
 | `/clear` context reset | Yes | Not available | Use `--continue` for resume |
 | Prompt caching | 90% discount | Unknown | Cost impact unclear |
 | Sandbox modes | None built-in | None (approval-only) | Similar security posture |

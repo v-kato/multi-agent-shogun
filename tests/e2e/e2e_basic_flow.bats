@@ -10,6 +10,16 @@
 #   5. ashigaru1 notifies karo → karo receives report_received
 #
 # Uses mock_cli.sh (no real AI APIs needed).
+#
+# ★配送契約の注記 (cmd_754 / 2026-09-08 改訂):
+#   inbox_watcher からの自動打鍵は★全廃した。`inboxN` の nudge も
+#   `/clear`・`/new` も、watcher は★一つも送らない。本ファイルの
+#   `send_to_pane` は★試験ハーネスが人の手を模して打つものであり、
+#   watcher の挙動ではない。ゆえに以下の各試験が確かめているのは
+#   「入力が届いた後、mock が正しく処理するか」であって、
+#   「watcher が入力を届けるか」ではない。
+#   実際に配送を担うのは claude=Stop hook のみ、他CLIは★人経路である。
+#   正本: docs/delivery_channels.md
 # ═══════════════════════════════════════════════════════════════
 
 # bats file_tags=e2e
@@ -47,9 +57,10 @@ setup() {
 # ═══════════════════════════════════════════════════════════════
 # E2E-001-A: Direct task assignment to ashigaru
 # ═══════════════════════════════════════════════════════════════
-# Simplified flow: place task YAML + send inbox nudge → ashigaru processes
+# Simplified flow: place task YAML + 人手を模した inboxN 入力 → ashigaru processes
+# ★watcher は inboxN を送らぬ (cmd_754 E-1)。下の send_to_pane は人の打鍵の模擬。
 
-@test "E2E-001-A: ashigaru1 processes assigned task via inbox nudge" {
+@test "E2E-001-A: ashigaru1 processes assigned task via 人手模擬の inboxN 入力" {
     # 1. Place task YAML for ashigaru1
     cp "$PROJECT_ROOT/tests/e2e/fixtures/task_ashigaru1_basic.yaml" \
        "$E2E_QUEUE/queue/tasks/ashigaru1.yaml"
@@ -58,7 +69,8 @@ setup() {
     bash "$E2E_QUEUE/scripts/inbox_write.sh" "ashigaru1" \
         "タスクYAMLを読んで作業開始せよ。" "task_assigned" "karo"
 
-    # 3. Send inbox nudge to ashigaru1
+    # 3. 人手を模して ashigaru1 の pane へ inbox1 を入力する
+    #    (★watcher の自動 nudge ではない — cmd_754 で全廃した)
     local ashigaru1_pane
     ashigaru1_pane=$(pane_target 1)
     send_to_pane "$ashigaru1_pane" "inbox1"
@@ -94,7 +106,8 @@ setup() {
     bash "$E2E_QUEUE/scripts/inbox_write.sh" "karo" \
         "cmd_test_001を発行した。" "cmd_new" "shogun"
 
-    # 3. Send nudge to karo — karo reads inbox, sees cmd_new, decomposes
+    # 3. 人手を模して karo の pane へ inbox1 を入力する — karo は inbox を読み、
+    #    cmd_new を見て分解する (★watcher の自動 nudge ではない)
     local karo_pane
     karo_pane=$(pane_target 0)
     send_to_pane "$karo_pane" "inbox1"
@@ -126,7 +139,8 @@ setup() {
     karo_pane=$(pane_target 0)
     ashigaru1_pane=$(pane_target 1)
 
-    # 2. Trigger karo to decompose (inbox1 → process_inbox detects cmd_new → decompose)
+    # 2. 人手模擬の inbox1 入力で karo に分解させる
+    #    (inbox1 → process_inbox detects cmd_new → decompose)
     bash "$E2E_QUEUE/scripts/inbox_write.sh" "karo" \
         "cmd_test_001を発行した。" "cmd_new" "shogun"
     send_to_pane "$karo_pane" "inbox1"
@@ -135,7 +149,7 @@ setup() {
     run wait_for_file "$E2E_QUEUE/queue/tasks/ashigaru1.yaml" 20
     assert_success
 
-    # 4. Trigger ashigaru1 to process
+    # 4. 人手模擬の inbox1 入力で ashigaru1 に処理させる
     send_to_pane "$ashigaru1_pane" "inbox1"
 
     # 5. Wait for completion

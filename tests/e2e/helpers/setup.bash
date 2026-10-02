@@ -36,6 +36,9 @@ setup_e2e_session() {
         mkdir -p "$E2E_QUEUE/lib"
         cp "$PROJECT_ROOT/lib/cli_adapter.sh" "$E2E_QUEUE/lib/" 2>/dev/null || true
         cp "$PROJECT_ROOT/lib/agent_status.sh" "$E2E_QUEUE/lib/" 2>/dev/null || true
+        # pane_preflight.sh (cmd_754): 未配置だと inbox_watcher が全ての
+        # send-keys を fail-safe 抑止するため、E2E でも必ず配る。
+        cp "$PROJECT_ROOT/lib/pane_preflight.sh" "$E2E_QUEUE/lib/" 2>/dev/null || true
     fi
 
     # Copy config/ for cli_adapter settings resolution

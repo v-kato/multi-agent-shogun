@@ -156,22 +156,48 @@ Step 4: Resume work based on task status
 
 ### send-keys Compatibility
 
-| Mode | send-keys | capture-pane | Notes |
-|------|-----------|-------------|-------|
+下表は人手で `tmux send-keys` を使って操作する場合の相性を示す参考である
+(自動nudgeの可否とは別の話——自動nudgeについては次項「Nudge Mechanism」)。
+
+| Mode | send-keys (人手) | capture-pane | Notes |
+|------|-----------------|-------------|-------|
 | TUI (default) | Risky (alt-screen) | Risky | Use `--no-alt-screen` |
 | TUI + `--no-alt-screen` | Should work | Should work | Preferred for tmux |
 | `codex exec` | N/A (non-interactive) | stdout capture | Best for automation |
 
-### Nudge Mechanism
+### Nudge Mechanism (自動打鍵は有効)
 
-For TUI mode with `--no-alt-screen`:
-- inbox_watcher.sh sends nudge text (e.g., `inbox3`) via tmux send-keys
-- Safety (shogun): if the Shogun pane is active (the Lord is typing), watcher avoids send-keys and uses tmux `display-message` only
-- After receiving a nudge, the agent reads `queue/inbox/<agent>.yaml` and processes unread messages
+2026-09-08、nudge の Enter が確認モーダルの既定選択肢を選び、D002-E1 違反の
+削除が実行された。「削除するな」という命令を届けたことが、削除する釦を
+押した。以後4世代にわたり「画面から安全を証明する」試みを重ねたが4度とも
+破れ、将軍は一時★自動打鍵の安全集合を空とする裁定を下した。しかし
+2026-09-10、cmd_760により復元され、nudgeは現在も有効である(詳細は
+`instructions/common/protocol.md`の「Delivery Mechanism」節)。
+
+For TUI mode:
+- ★inbox_watcher は nudge(`tmux send-keys`による`inboxN`打鍵)を★実際に
+  送信する。Codexのsuggestion UIを解除する専用処理(`x`→C-u)を挟む。
+- ★Codex には Stop hook が無く、agent 自前の self-watch も実在しない。
+  すなわちCodex agentへの★確定配送経路(送信を裏付ける仕組み)は存在せず、
+  nudgeはベストエフォートに留まる。
+- watcherは0〜2分は通常nudge、2〜4分もEscapeエスカレーションは無効化
+  され通常nudgeへフォールバックする(Codex CLIはESCが「中断」になり
+  やすいため)。4分を過ぎても★`/clear`(`/new`)エスカレーションはCodex
+  には送られない——会話が切れてしまうため実装は安全側に倒し、通常
+  nudgeへ留めたままタイマーをリセットする(`scripts/inbox_watcher.sh`
+  のPhase3 codex分岐)。閾値超過で家老inboxへ自動で上がる機構もいずれの
+  段階にも無い。確定配送経路が無い以上、届いたか疑わしいときに気づいて
+  動くのは★人である。
+- `type: clear_command`メッセージ(Redo Protocol等)受信時は、上記の
+  時間エスカレーションとは別に即座に`/new`へ変換されて★自動送信される
+  (busy中は次サイクルへ延期)。
+- ★対象paneに確認モーダルが表示されている間は、そのagent宛てに
+  `inbox_write`しないこと(「Delivery Mechanism」節と同趣旨)。
+- 詳細: `docs/delivery_channels.md`
 
 For `codex exec` mode:
 - Each task is a separate `codex exec` invocation
-- No nudge needed — task content is passed as argument
+- 元より nudge を要さぬ経路である(task 内容を引数で渡す)。
 
 ## MCP Configuration
 
@@ -225,7 +251,7 @@ Model is set by `build_cli_command()` in cli_adapter.sh based on settings.yaml. 
 | Memory MCP | Built-in | Not built-in (configurable) | Recovery relies on AGENTS.md + files |
 | Task tool (subagents) | Yes | No | Cannot spawn sub-agents |
 | Skill system | Yes | No | No slash command skills |
-| Dynamic model switch | `/model` via send-keys | `/model` in TUI only | Limited in automated mode |
+| Dynamic model switch | inbox `model_switch`で`/model`を★自動送信 | `/model` in TUI only(自動送信非対応) | Codexのみ人手が要る |
 | `/clear` context reset | Yes | `/new` (TUI only) | Exec mode: new invocation |
 | Prompt caching | 90% discount | 75% discount | Higher cost per token |
 | Subscription limits | API-based (no limit) | msg/5h limits (Plus/Pro) | Bottleneck for parallel ops |

@@ -73,13 +73,24 @@ For Ashigaru: You don't switch models yourself. Karo manages this.
 
 ## /clear Protocol
 
-For Karo only: Send `/clear` to ashigaru for context reset:
+For Karo only: Queue a context reset **request** for ashigaru:
 
 ```bash
 bash scripts/inbox_write.sh ashigaru{N} "タスクYAMLを読んで作業開始せよ。" clear_command karo
 ```
 
-For Ashigaru: After `/clear`, follow CLAUDE.md /clear recovery procedure. Do NOT read instructions/ashigaru.md for the first task (cost saving).
+`clear_command` は★自動で送信される(CLI別: Claude/Copilot/Kimi→`/clear`、
+Codex/OpenCode→`/new`としてpaneへ直接打鍵される)。送信前に対象paneへ
+確認モーダルが表示されていないか確認すること(モーダル表示中はnudgeの
+Enterが既定選択肢を誤って押す危険があるため。詳細はCLAUDE.md
+「Delivery Mechanism」節)。
+
+送信後、inbox_watcherが`[auto-recovery] task_assigned`を自動投入する。
+投入内容は永続化されるが、起床(即時の気づき)はベストエフォート(nudge)
+または確定的だがターン終了時点の遅延を伴う経路(Stop hook)によるもので
+あり、確実ではない。
+
+For Ashigaru: After the context reset is entered, follow CLAUDE.md /clear recovery procedure. Do NOT read instructions/ashigaru.md for the first task (cost saving).
 
 ## Compaction Recovery
 
@@ -87,6 +98,6 @@ All agents: Follow the Session Start / Recovery procedure in CLAUDE.md. Key step
 
 1. Identify self: `tmux display-message -t "$TMUX_PANE" -p '#{@agent_id}'`
 2. `mcp__memory__read_graph` — restore rules, preferences, lessons
-3. Read your instructions file (shogun→instructions/shogun.md, karo→instructions/karo.md, ashigaru→instructions/ashigaru.md)
+3. Read your instructions file (shogun→instructions/shogun.md, karo→instructions/generated/karo.md, ashigaru→instructions/ashigaru.md)
 4. Rebuild state from primary YAML data (queue/, tasks/, reports/)
 5. Review forbidden actions, then start work

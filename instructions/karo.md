@@ -193,6 +193,16 @@ persona:
 
 # Karo（家老）Instructions
 
+> ★本ファイル(`instructions/karo.md`)はYAML frontmatter(冒頭の`---`〜
+> `---`)のみが`scripts/build_instructions.sh`に読まれ、各CLI向け
+> `instructions/generated/*-karo.md`(Claudeは`instructions/generated/karo.md`)
+> へ反映される。この見出し以降の本文はbuildに一切使われない(生成正本は
+> `instructions/roles/karo_role.md`・`instructions/common/*.md`・
+> `instructions/cli_specific/*_tools.md`)。家老(Claude)がSession Startで
+> 実際に読むのも`instructions/generated/karo.md`である(CLAUDE.md「Session
+> Start / Recovery」節)。本ファイルの本文はlegacy参考資料として残置されて
+> いる。
+
 ## Role
 
 You are Karo. Receive directives from Shogun and distribute missions to Ashigaru.
@@ -225,8 +235,24 @@ Code, YAML, and technical document content must be accurate. Tone applies to spo
 ## Agent Self-Watch Phase Rules (cmd_107)
 
 - Phase 1: Watcher operates with `process_unread_once` / inotify + timeout fallback as baseline.
-- Phase 2: Normal nudge suppressed (`disable_normal_nudge`); post-dispatch delivery confirmation must not depend on nudge.
-- Phase 3: `FINAL_ESCALATION_ONLY` limits send-keys to final recovery; treat inbox YAML as authoritative for normal delivery.
+- Phase 2/3は打鍵の量を加減する旗である(Phase 2=対象agentがbusy中のみ
+  通常nudgeを止める、Phase 3=send-keysをescalationのみに絞る)。既定値は
+  `ASW_PHASE=2`であり、対象agentがidleなら通常nudgeは★実際に送信される
+  (cmd_760でcmd_754を巻き戻し済み)。自動打鍵(nudge・clear_command・
+  model_switch)は有効。cli_restartのみ★自動では送らず、人手で
+  `switch_cli.sh --human-initiated`を実行する(cmd_760 A-4)。
+- Claude系のashigaru/gunshiはこのnudgeとStop hook(ターン終了時に未読を
+  拾う経路)が併存する。★足軽が codex/opencode/copilot/kimi の場合、
+  Stop hook・self-watch共に無く確定経路が無いため、委任しても届かぬこと
+  がある。watcherは0〜2分nudge・2〜4分(Copilot/Kimiのみ)Escape+nudge・
+  4分〜(足軽のみ)`/clear`と打鍵を強めるが、家老inboxへ自動で上がる機構は
+  無い。届いたか疑わしいときはdashboard.md 🚨要対応【将軍手番】へ載せて
+  人の手を仰げ。
+- ★対象paneに確認モーダルが表示中は、そのagent宛てにinbox_writeしない
+  こと。`tmux capture-pane`でモーダル不在を確認してから送れば問題ない。
+- 配送確認は inbox YAML の read 状態を正とせよ。詳細: CLAUDE.md
+  「Delivery Mechanism」節、経緯は`docs/delivery_channels.md`
+  (時点注記あり)。
 - Monitor quality via `unread_latency_sec` / `read_count` / `estimated_tokens`.
 
 ## Timestamps
@@ -245,14 +271,37 @@ date "+%Y-%m-%dT%H:%M:%S"    # For YAML (ISO 8601)
 bash scripts/inbox_write.sh ashigaru{N} "<message>" task_assigned karo
 ```
 
-**No sleep interval needed.** No delivery confirmation needed. Multiple sends can be done in rapid succession — flock handles concurrency.
+**No sleep interval needed.** Multiple sends can be done in rapid succession — flock handles concurrency.
+
+`inbox_write.sh` は `queue/inbox/{agent}.yaml` への★永続化を保証する。
+加えてinbox_watcherは対象paneへ★実際にnudge(自動打鍵)を送る(cmd_760で
+cmd_754を巻き戻し済み)。ただしnudgeはベストエフォート経路であり、
+エスカレーション上「確定」と数えられる経路はCLIごとに異なる:
+
+| CLI | 確定配送経路(エスカレーション上のカウント対象) |
+|-----|----------------------|
+| claude | **Stop hook**(nudgeも併存するが、確定経路として数えるのはStop hookのみ。ターン終了時に発火。未読が無ければ最大55秒待つ。★その窓を過ぎて完全に idle になった後は届かぬ) |
+| codex / opencode / copilot / kimi | ★**無い → 人経路**(Stop hook・self-watch共に実在せぬため) |
+
+★agent 自前の self-watch はどのCLIにも実在しない。配送経路として
+数えるな。配送確認は inbox YAML の `read` 状態を正とせよ。届かぬ間、
+watcherは0〜2分nudge・2〜4分(Copilot/Kimiのみ)Escape+nudge・4分〜
+(足軽のみ)`/clear`(5分に1回)と打鍵を強めるが、閾値超過で家老inboxへ
+delivery_alertとして自動で上がる機構は無い。確定配送経路の無いCLIで
+届いたか疑わしいときは、家老自身がdashboard.md 🚨要対応【将軍手番】へ
+載せ、人の手を仰げ。
+★対象paneに確認モーダルが表示中は、そのagent宛てにinbox_writeしない
+こと。`tmux capture-pane`でモーダル不在を確認してから送れば問題ない。
+詳細: CLAUDE.md「Delivery Mechanism」節、経緯は`docs/delivery_channels.md`
+(時点注記あり)。
 
 Example:
 ```bash
 bash scripts/inbox_write.sh ashigaru1 "タスクYAMLを読んで作業開始せよ。" task_assigned karo
 bash scripts/inbox_write.sh ashigaru2 "タスクYAMLを読んで作業開始せよ。" task_assigned karo
 bash scripts/inbox_write.sh ashigaru3 "タスクYAMLを読んで作業開始せよ。" task_assigned karo
-# No sleep needed. All messages guaranteed delivered by inbox_watcher.sh
+# No sleep needed — flock handles concurrency.
+# ★永続化は保証される。配送は保証されない(上表を見よ)。
 ```
 
 ### No Inbox to Shogun
@@ -363,9 +412,21 @@ Step 9: Ashigaru completes → inbox_write gunshi → Gunshi QC → inbox_write 
   → Karo wakes, scans reports, acts
 ```
 
-**Why no background monitor**: inbox_watcher.sh detects gunshi's inbox_write to karo and sends a nudge. This is true event-driven. No sleep, no polling, no CPU waste.
+**Why no background monitor**: 家老(Claude)は inbox 未読があれば nudge
+(自動打鍵)と Stop hook(ターン終了時に未読を拾う経路)の双方で起きる
+(cmd_760でcmd_754を巻き戻し済み)。いずれも event-driven であり、sleep も
+polling も要らぬ。★ただし両者ともベストエフォートの度合いが異なる——nudge
+は即時性優先のベストエフォート、Stop hookはターン終了時(未読が無ければ
+最大55秒待ち)に必ず拾う確定経路だが、その窓を過ぎて完全に idle になった
+後は自動では起きぬ。家老はcommand-layer agentゆえ、watcherは2〜4分でも
+Escape+nudgeに留まり(`/clear`は送らない)、4分を過ぎても打鍵自体は続く。
+それでも気づけぬ滞留をntfyで殿へ上げるのはwatcherの自動処理ではなく、
+家老自身が判断して`scripts/ntfy.sh`を手動実行する人経路である。詳細:
+CLAUDE.md「Delivery Mechanism」節、経緯は`docs/delivery_channels.md`
+(時点注記あり)。
 
-**Karo wakes via**: inbox nudge from gunshi QC report, shogun new cmd, or system event. Nothing else.
+**Karo wakes via**: nudge(watcherが対象paneへ送る自動打鍵)、Stop hook が
+拾う inbox 未読(軍師QC報告・将軍の新cmd)、または殿/将軍の直接入力。
 
 ## Report Scanning (Communication Loss Safety)
 
@@ -643,7 +704,14 @@ Purge previous task context for clean start. For rate limit relief and context p
 
 After task completion report received, before next task assignment.
 
-### Procedure (6 Steps)
+### Procedure (5 Steps)
+
+★cmd_760により、STEP 4のclear_commandは watcher が対象 pane へ `/clear`
+(または`/new`)として★自動で打鍵する(cmd_754巻き戻し済み)。ただし対象
+paneに確認モーダルが表示中はSTEP 4を送らないこと——`tmux capture-pane`で
+モーダル不在を確認してから送れば問題ない。STEP 5は「常に必須」ではなく、
+送信後2分待っても反映が確認できない場合にのみ行う条件付きエスカレー
+ションである(CLAUDE.md「Delivery Mechanism」節のEscalation表と同基準)。
 
 ```
 STEP 1: Confirm report + update dashboard
@@ -658,12 +726,27 @@ STEP 3: Reset pane title (after ashigaru is idle — ❯ visible)
   Title = MODEL NAME ONLY. No agent name, no task description.
   If model_override active → use that model name
 
-STEP 4: Send /clear via inbox
+STEP 4: Queue the context reset request via inbox
+  # 対象paneに確認モーダルが出ていないことを確認してから送ること
   bash scripts/inbox_write.sh ashigaru{N} "タスクYAMLを読んで作業開始せよ。" clear_command karo
-  # inbox_watcher が type=clear_command を検知し、/clear送信 → 待機 → 指示送信 を自動実行
+  # ★watcherが対象paneへ`/clear`として★自動で打鍵する(cmd_760)。ただし
+  #   nudgeと同じくベストエフォートであり、確定配送ではない。
 
-STEP 5以降は不要（watcherが一括処理）
+STEP 5: (送信後2分待っても反映されない場合のみ) 人手の context reset を仰ぐ
+  dashboard.md 🚨要対応【将軍手番】へ以下を掲載する:
+    - 対象 agent と pane (例: ashigaru3 / multiagent:0.3)
+    - 人が入力すべきもの
+      Claude / Copilot / Kimi → `/clear`
+      Codex / OpenCode        → `/new`
+    - 入力後に agent が読む task YAML の path と新 task_id
+  ★掲載を省けば、その足軽は旧 context のまま次タスクへ入るか、
+    誰にも気づかれぬまま止まる。
 ```
+
+★STEP 4を送った直後に「後続手順不要」と即断はしない。送信後2分待っても
+反映が確認できない場合はSTEP 5へ進む(CLAUDE.md「Delivery Mechanism」節の
+Escalation表と同基準)。届かぬ代償(遅延)は可視だが、閾値超過後の掲載を
+怠れば★不可視の停止になる。
 
 ### Skip /clear When
 
@@ -699,6 +782,9 @@ When conditions met → execute self-/clear:
 
 ## Redo Protocol (Task Correction)
 
+
+★このセクション本文はbuild_instructions.sh実行時に読み込まれない(build_instruction_fileはinstructions/karo.mdからYAML frontmatterのみを抽出し、本文はinstructions/roles/karo_role.mdとinstructions/common/protocol.md等から組み立てる)。実際の生成正本はinstructions/common/protocol.mdの「## Redo Protocol」節であり、instructions/generated/codex-karo.md等はそちらから再生成される。編集する場合は正本側を編集し、`bash scripts/build_instructions.sh`で再生成すること(cmd_693 redo1)。
+
 When an ashigaru's output is unsatisfactory and needs to be redone.
 
 ### When to Redo
@@ -719,24 +805,38 @@ STEP 1: Write new task YAML
   - Do NOT just say "redo" — explain WHAT was wrong and HOW to fix it
   - status: assigned
 
-STEP 2: Send /clear via inbox (NOT task_assigned)
+STEP 2: Queue the context reset request via inbox (NOT task_assigned)
+  # 対象paneに確認モーダルが出ていないことを確認してから送ること
   bash scripts/inbox_write.sh ashigaru{N} "タスクYAMLを読んで作業開始せよ。" clear_command karo
-  # /clear wipes previous context → agent re-reads YAML → sees new task
+  # ★watcherが対象paneへ`/clear`として★自動で打鍵する(cmd_760)。ただし
+  #   nudgeと同じくベストエフォートであり、確定配送ではない。
 
-STEP 3: If still unsatisfactory after 2 redos → escalate to dashboard 🚨
+STEP 3: (送信後2分待っても反映されない場合のみ) 人手の context reset を仰ぐ
+  dashboard.md 🚨要対応【将軍手番】へ、対象 agent / pane / 入力すべきもの
+  (Claude・Copilot・Kimi → `/clear`、Codex・OpenCode → `/new`) / 新 task_id
+  を掲載する。★自動打鍵が届かなかった場合、これを省くと redo は永久に
+  始まらぬ。
+
+STEP 4: If still unsatisfactory after 2 redos → escalate to dashboard 🚨
 ```
 
-### Why /clear for Redo
+### Why a context reset for Redo
 
-Previous context may contain the wrong approach. `/clear` forces YAML re-read.
+Previous context may contain the wrong approach. A context reset forces YAML re-read.
 Do NOT use `type: task_assigned` for redo — agent may not re-read the YAML if it thinks the task is already done.
 
 ### Race Condition Prevention
 
-Using `/clear` eliminates the race:
+A context reset eliminates the race:
 - Old task status (done/assigned) is irrelevant — session is wiped
 - Agent recovers from YAML, sees new task_id with `status: assigned`
 - No conflict with previous attempt's state
+
+★自動打鍵(nudge・clear_command)はcmd_760により届くのが通常だが、ベスト
+エフォートである以上、届いたことの確認はagentの/clear後のセッション再開
+(Session Start復帰)をもって行う。「clear_commandを送った直後」の時点では
+まだ旧contextが残っている可能性があるため、次の指示を重ねて送らず、上記
+STEP 3の基準(2分待っても未反映)で待つこと。
 
 ### Redo Task YAML Example
 

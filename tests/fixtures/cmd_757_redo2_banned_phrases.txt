@@ -1,0 +1,10 @@
+安全パターンの列挙へ反転させるな
+未収載のモーダルが素通りしても
+として弾いているからである
+両者が食い違うことはない
+同じ target 文字列を使うので
+`/clear`(`/new`)ただ一つ
+(codex/opencode は `/new`)
+通知先は家老 inbox
+<inbox_type> [agent_id]
+${4:-unknown}

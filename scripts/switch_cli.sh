@@ -3,26 +3,32 @@
 # switch_cli.sh — エージェントのCLIセッションを安全に切り替える
 #
 # Usage:
-#   bash scripts/switch_cli.sh <agent_id> [--type <cli_type>] [--model <model_name>] [--variant <variant>]
+#   bash scripts/switch_cli.sh <agent_id> --human-initiated [--type <cli_type>] [--model <model_name>] [--variant <variant>]
+#
+# ★--human-initiated は必須である (cmd_754 将軍裁定 E-1)。
+#   本スクリプトは agent CLI が動いている pane へ /exit を打ち込む。そこへの
+#   ★自動打鍵は廃止された。旗を付けられるのは「人が今この切替を命じ、当該
+#   pane を見ている」場合だけであり、自動経路は決して付けてはならぬ。
 #
 # Examples:
 #   # settings.yaml の現在値で再起動（CLI種別/モデル変更なし）
-#   bash scripts/switch_cli.sh ashigaru3
+#   bash scripts/switch_cli.sh ashigaru3 --human-initiated
 #
-#   # Codex Spark → Claude Sonnet に切替
-#   bash scripts/switch_cli.sh ashigaru3 --type claude --model claude-sonnet-4-6
+#   # Codex Spark → Claude Sonnet に切替（別名。5.5系へ解決される。旧版互換で
+#   # 明示IDを使うなら --model claude-sonnet-4-6 も引き続き利用可）
+#   bash scripts/switch_cli.sh ashigaru3 --human-initiated --type claude --model sonnet
 #
 #   # OpenCode で provider/model を直接指定（role 定義は --agent、モデル変更は再起動で反映）
-#   bash scripts/switch_cli.sh ashigaru3 --type opencode --model openai/gpt-5.4-mini
+#   bash scripts/switch_cli.sh ashigaru3 --human-initiated --type opencode --model openai/gpt-5.4-mini
 #
 #   # OpenCode provider-specific reasoning variant
-#   bash scripts/switch_cli.sh ashigaru3 --type opencode --model openrouter/minimax/minimax-m2.5 --variant xhigh
+#   bash scripts/switch_cli.sh ashigaru3 --human-initiated --type opencode --model openrouter/minimax/minimax-m2.5 --variant xhigh
 #
-#   # 同一CLI内でモデルだけ変更（Sonnet → Opus）
-#   bash scripts/switch_cli.sh ashigaru3 --model claude-opus-4-6
+#   # 同一CLI内でモデルだけ変更（Sonnet → Opus、別名。5.5系へ解決される）
+#   bash scripts/switch_cli.sh ashigaru3 --human-initiated --model opus
 #
-#   # 全足軽を一括切替
-#   for i in $(seq 1 7); do bash scripts/switch_cli.sh ashigaru$i --type claude --model claude-sonnet-4-6; done
+#   # 全足軽を一括切替（人が見ている前提で一括して命じる場合）
+#   for i in $(seq 1 7); do bash scripts/switch_cli.sh ashigaru$i --human-initiated --type claude --model sonnet; done
 #
 # Flow:
 #   1. (Optional) settings.yaml を更新
@@ -44,6 +50,33 @@ LOG_FILE="${PROJECT_ROOT}/logs/switch_cli.log"
 source "${PROJECT_ROOT}/lib/cli_adapter.sh"
 source "${PROJECT_ROOT}/lib/agent_registry.sh"
 
+# ─── ★打鍵は人手起動のときだけ (cmd_754 将軍裁定 E-1) ───
+# 本スクリプトは pane へ /exit と起動コマンドを打ち込む。打ち込む先は
+# ★agent CLI が動いている pane である。将軍裁定 E-1 により、そこへの
+# ★自動打鍵は廃した。
+#
+# ゆえに本スクリプトは、既定では★一切打鍵しない。打鍵するのは
+# `--human-initiated` を明示して起動されたときだけである。この旗は
+# 「人が今この切替を命じ、当該 pane を見ている」ことの表明であり、
+# ★自動経路(inbox_watcher の cli_restart 等)は決してこれを付けない。
+# 付けてよいのは、殿の指示で将軍が手ずから叩く場合のみである。
+#
+# ★旗を付けても、画面から安全を推し量ることは一切しない。4世代にわたり
+#   破れた問いを持ち込まぬためである。安全を担保するのは「人が見ている」
+#   という事実だけであり、それは画面からは分からぬ。ゆえに旗にする。
+#
+# ★残余リスク(正直に記す): 人が旗を付けて起動したその瞬間に、pane が
+#   確認モーダルを表示していれば /exit の Enter がそれを答え得る。旗は
+#   その危険を消さず、★責任の所在を人へ移すだけである。
+_pane_preflight_lib="${PROJECT_ROOT}/lib/pane_preflight.sh"
+if [ -f "$_pane_preflight_lib" ]; then
+    # shellcheck source=../lib/pane_preflight.sh
+    source "$_pane_preflight_lib"
+fi
+
+# 人手起動の表明。--human-initiated が渡されたときだけ 1 になる。
+SC_HUMAN_INITIATED=0
+
 # ─── ログ ───
 log() {
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] [switch_cli] $*"
@@ -57,8 +90,11 @@ usage() {
     echo ""
     echo "  agent_id   Agent configured in config/settings.yaml (e.g. karo, ashigaru1, gunshi)"
     echo "  --type     claude | codex | copilot | kimi | opencode"
-    echo "  --model    claude-sonnet-4-6 | claude-opus-4-6 | gpt-5.3-codex | openai/gpt-5.4-mini | etc."
+    echo "  --model    fable | sonnet | opus | gpt-6-sol | gpt-6-luna | openai/gpt-5.4-mini | etc."
     echo "  --variant  OpenCode model variant such as xhigh, high, max, minimal"
+    echo "  --human-initiated  ★必須。人が今この切替を命じ、当該paneを見ていることの表明。"
+    echo "                     これ無しでは打鍵しない (cmd_754 将軍裁定 E-1)。"
+    echo "                     自動経路(inbox_watcher 等)は決して付けてはならぬ。"
     echo ""
     echo "If --type/--model omitted, uses current settings.yaml values."
     exit 1
@@ -289,7 +325,51 @@ get_current_pane_cli() {
     tmux show-options -p -t "$pane" -v @agent_cli 2>/dev/null | tr -d '[:space:]' || echo "claude"
 }
 
+# ─── 打鍵の入口 (cmd_754 E-1) ───
+# sc_human_gate <purpose>
+#   人手起動でなければ打鍵しない。★画面は一切見ない。
+# Returns: 0 = 人手起動である / 1 = 自動起動ゆえ打鍵しない
+sc_human_gate() {
+    local purpose="$1"
+    if [ "${SC_HUMAN_INITIATED:-0}" = "1" ]; then
+        return 0
+    fi
+    log "[NO-AUTO-SEND] ${purpose} を送らぬ。agent CLI 稼働paneへの自動打鍵は cmd_754 の裁定により廃止した"
+    log "                人手で切り替えるなら --human-initiated を付けて実行せよ (当該paneを見ている人が責を負う)"
+    return 1
+}
+
+# sc_send_keys <pane> <ctx> <purpose> <send-keys引数...>
+# ★人手起動のときだけ送る。ctx は記録のためだけに受け取る(判定には使わぬ)。
+# ★配送失敗を握り潰さぬこと (cmd_754 redo3 D-6-1 /
+#   G754-SEND-FAILURE-ACK-REDO2-02)。redo2 は tmux send-keys の失敗を
+#   `|| true` で捨てており、/exit が届いていなくても次の打鍵へ進み、
+#   最終的に「再起動できた」ことにされていた。
+# Returns: 0 = 送った / 1 = 送らなかった(自動起動) / 2 = ★配送に失敗した
+#          (1 も 2 も「送っていない」ゆえ、呼出側は以降の打鍵を中止すること)
+sc_send_keys() {
+    local pane="$1"
+    local ctx="$2"
+    local purpose="$3"
+    shift 3
+
+    sc_human_gate "${purpose} (pane=${pane}, ctx=${ctx})" || return 1
+    local send_rc=0
+    tmux send-keys -t "$pane" "$@" 2>/dev/null || send_rc=$?
+    if [ "$send_rc" -ne 0 ]; then
+        log "[SEND-FAILURE] ${purpose} の打鍵送信が失敗した (rc=${send_rc}, pane=${pane})。以降の打鍵は送らぬ"
+        return 2
+    fi
+    return 0
+}
+
 # ─── /exit送信 ───
+# ★打鍵先は agent CLI が動いている pane である。人手起動でなければ1打鍵も
+#   送らない (cmd_754 E-1)。送信に失敗したら以降を送らず非0で戻る。
+# ★人手起動であっても、その瞬間 pane がモーダルを出していれば /exit の
+#   Enter がそれを答え得る。この危険は消せぬ。旗はそれを人の責任として
+#   引き受ける表明である。
+# Returns: 0 = 一連の打鍵を送り切った / 1 = 送らずに中断した
 send_exit() {
     local pane="$1"
     local current_cli="$2"
@@ -299,66 +379,99 @@ send_exit() {
     case "$current_cli" in
         codex)
             # Codex: suggestion UI dismissal → Ctrl-C → /exit
-            tmux send-keys -t "$pane" Escape 2>/dev/null || true
+            sc_send_keys "$pane" "$current_cli" "/exit手順のEscape" Escape || return 1
             sleep 0.3
-            tmux send-keys -t "$pane" C-c 2>/dev/null || true
+            sc_send_keys "$pane" "$current_cli" "/exit手順のC-c" C-c || return 1
             sleep 0.5
-            tmux send-keys -t "$pane" "/exit" 2>/dev/null || true
+            sc_send_keys "$pane" "$current_cli" "/exit文字列の入力" "/exit" || return 1
             sleep 0.3
-            tmux send-keys -t "$pane" Enter 2>/dev/null || true
+            sc_send_keys "$pane" "$current_cli" "/exit確定のEnter" Enter || return 1
             ;;
         claude)
-            tmux send-keys -t "$pane" "/exit" 2>/dev/null || true
+            sc_send_keys "$pane" "$current_cli" "/exit文字列の入力" "/exit" || return 1
             sleep 0.3
-            tmux send-keys -t "$pane" Enter 2>/dev/null || true
+            sc_send_keys "$pane" "$current_cli" "/exit確定のEnter" Enter || return 1
             ;;
         copilot|kimi)
-            tmux send-keys -t "$pane" C-c 2>/dev/null || true
+            sc_send_keys "$pane" "$current_cli" "/exit手順のC-c" C-c || return 1
             sleep 0.5
-            tmux send-keys -t "$pane" "/exit" 2>/dev/null || true
+            sc_send_keys "$pane" "$current_cli" "/exit文字列の入力" "/exit" || return 1
             sleep 0.3
-            tmux send-keys -t "$pane" Enter 2>/dev/null || true
+            sc_send_keys "$pane" "$current_cli" "/exit確定のEnter" Enter || return 1
             ;;
         *)
-            tmux send-keys -t "$pane" "/exit" 2>/dev/null || true
+            sc_send_keys "$pane" "$current_cli" "/exit文字列の入力" "/exit" || return 1
             sleep 0.3
-            tmux send-keys -t "$pane" Enter 2>/dev/null || true
+            sc_send_keys "$pane" "$current_cli" "/exit確定のEnter" Enter || return 1
             ;;
     esac
+    return 0
 }
 
-# ─── シェルプロンプト待ち（最大15秒） ───
+# ─── 新CLI起動打鍵 ───
+# ★/exit 後の pane は「CLI 終了後のシェル」であるはずである。それを
+#   ★画面の見た目ではなく pane の前景プロセス(#{pane_current_command})で
+#   確かめる。前景が素のシェルなら TUI は存在せず、したがってモーダルも
+#   既定選択肢も存在しない(lib/pane_preflight.sh の pane_is_bare_shell)。
+#   /exit が効かず CLI が生きていれば前景は CLI のままであり、そこへ
+#   起動コマンドを打ち込むことはしない。
+# Returns: 0 = 起動打鍵を送った / 3 = 中止した
+launch_new_cli() {
+    local pane="$1"
+    local target_cmd="$2"
+
+    if ! declare -f pane_is_bare_shell >/dev/null 2>&1; then
+        log "ERROR: lib/pane_preflight.sh を読み込めておらぬ。pane が素のシェルか確かめられぬゆえ新CLIを起動せず中止する (pane=${pane})"
+        return 3
+    fi
+    if ! pane_is_bare_shell "$pane"; then
+        log "ERROR: /exit 後も pane の前景が素のシェルではない (理由=${PANE_SHELL_REASON:-unknown}, pane=${pane})。"
+        log "       ★CLI が終了できておらぬ見込みである。起動打鍵は送らず中止する。人が当該paneを確認せよ。"
+        return 3
+    fi
+
+    if ! sc_send_keys "$pane" shell "新CLI起動コマンドの入力" "$target_cmd"; then
+        log "ERROR: 新CLI起動コマンドを送らなかった。CLI切替を中止する (pane=${pane})"
+        return 3
+    fi
+    sleep 0.3
+    if ! sc_send_keys "$pane" shell "新CLI起動のEnter" Enter; then
+        log "ERROR: 新CLI起動のEnterを送らなかった。CLI切替を中止する (pane=${pane})"
+        log "       ★起動コマンドの文字列は入力欄に残るが、Enterを送らぬ限り実行されぬ。人が確認せよ。"
+        return 3
+    fi
+    return 0
+}
+# ─── (preflight gate 対象打鍵ここまで) ───
+
+# ─── シェルへ戻るのを待つ（最大15秒） ───
+# ★cmd_754: 旧版は capture-pane の文字列から「プロンプトらしき行」や
+#   「Bye 等の終了メッセージ」を探していた。これは画面からの推論であり、
+#   本 cmd が4世代にわたり破ってきた問いと同じ病である(`Continue#` の
+#   一行だけで shell と誤認した実例がある)。
+#   ★よって画面は読まず、pane の前景プロセスが素のシェルへ戻ったことを
+#   待つ。前景プロセスは描画物ではなく職制御の事実である。
+# ★本関数は待つだけで、打鍵を許可しない。許可の判断は launch_new_cli が
+#   改めて pane_is_bare_shell で行う。
 wait_for_shell_prompt() {
     local pane="$1"
     local max_wait=15
     local waited=0
 
-    log "Waiting for shell prompt on ${pane}..."
+    log "Waiting for the pane to return to a bare shell: ${pane}"
 
     while [ "$waited" -lt "$max_wait" ]; do
         sleep 1
         waited=$((waited + 1))
 
-        local last_lines
-        last_lines=$(tmux capture-pane -t "$pane" -p 2>/dev/null | grep -v '^$' | tail -3)
-
-        # シェルプロンプトの検出パターン
-        # PS1にはカスタムプロンプト（shutsujin由来）や標準的な$/%が含まれる
-        if echo "$last_lines" | grep -qE '[\$%#❯►] *$'; then
-            log "Shell prompt detected after ${waited}s"
-            return 0
-        fi
-
-        # "exit" / "Bye" 等のCLI終了メッセージを検出
-        if echo "$last_lines" | grep -qiE '(bye|goodbye|exiting|exit)'; then
-            sleep 1  # 終了メッセージの後、プロンプトが出るまで少し待つ
-            log "CLI exit message detected after ${waited}s"
+        if declare -f pane_is_bare_shell >/dev/null 2>&1 && pane_is_bare_shell "$pane"; then
+            log "Bare shell detected after ${waited}s (${PANE_SHELL_REASON:-unknown})"
             return 0
         fi
     done
 
-    log "WARN: Shell prompt not detected after ${max_wait}s. Proceeding anyway."
-    return 0  # タイムアウトしても続行（最悪でもコマンドが送られるだけ）
+    log "WARN: pane did not return to a bare shell within ${max_wait}s. 判定は launch_new_cli に委ねる。"
+    return 0  # タイムアウトしても続行（launch_new_cli が改めて確かめて中止する）
 }
 
 # ─── モデル表示名の正規化（cli_adapter.sh の get_model_display_name を使用） ───
@@ -412,6 +525,12 @@ while [ $# -gt 0 ]; do
             NEW_VARIANT="$2"
             shift 2
             ;;
+        --human-initiated)
+            # ★人が今この切替を命じ、当該 pane を見ていることの表明。
+            #   自動経路は決してこれを付けない (cmd_754 E-1)。
+            SC_HUMAN_INITIATED=1
+            shift
+            ;;
         --help|-h)
             usage
             ;;
@@ -438,7 +557,7 @@ log "=== Starting CLI switch for ${AGENT_ID} (pane: ${PANE_TARGET}) ==="
 # Step 0.5: --model指定時に--type未指定なら、CLI種別を安全に補完する
 if [[ -n "$NEW_MODEL" && -z "$NEW_TYPE" ]]; then
     case "$NEW_MODEL" in
-        gpt-5.3-codex*|gpt-5-codex*)
+        gpt-5.3-codex*|gpt-5-codex*|gpt-5.6-*|gpt-6-*|gpt-reserve)
             NEW_TYPE="codex"
             log "Auto-inferred type=codex from model=${NEW_MODEL}"
             ;;
@@ -451,11 +570,26 @@ if [[ -n "$NEW_MODEL" && -z "$NEW_TYPE" ]]; then
                 exit 1
             fi
             ;;
-        claude-*)
+        claude-*|fable|sonnet|opus)
             NEW_TYPE="claude"
             log "Auto-inferred type=claude from model=${NEW_MODEL}"
             ;;
     esac
+fi
+
+# Step 0.6: ★着手前の gate (cmd_754 E-1)。
+#   自動起動なら★settings.yaml を書き換える前にここで止める。後段の各打鍵
+#   でも止まるが、ここで止めれば「設定だけ書き換わって実CLIは旧のまま」と
+#   いう乖離を作らずに済む。
+#   ★引数の検証(直前の型補完)より★後に置く。引数の誤りは pane に触れずとも
+#   分かることであり、人手起動かどうかに関わらず同じ理由で失敗させるべき
+#   だからである(自動起動でも「その引数は曖昧である」と返る方が親切であり、
+#   既存の契約でもある)。gate を先に置くと、曖昧な --model を渡した呼出しが
+#   「曖昧である」ではなく「自動起動ゆえ中止」で返り、誤りが隠れる。
+if ! sc_human_gate "CLI切替の着手 (${AGENT_ID}, pane=${PANE_TARGET})"; then
+    log "ERROR: 自動起動ゆえ CLI 切替を行わぬ。settings.yaml も書き換えぬ (${AGENT_ID})"
+    log "       ★人手で切り替えるなら: bash scripts/switch_cli.sh ${AGENT_ID} --human-initiated [--type ...] [--model ...]"
+    exit 3
 fi
 
 # Step 1: settings.yaml 更新（--type/--model/--variant 指定時のみ）
@@ -477,16 +611,24 @@ log "Target: cli=${TARGET_CLI_TYPE}, model=${TARGET_MODEL}, cmd=${TARGET_CMD}"
 # Step 3: 現在のCLIを /exit で終了
 CURRENT_CLI=$(get_current_pane_cli "$PANE_TARGET")
 log "Current CLI: ${CURRENT_CLI}"
-send_exit "$PANE_TARGET" "$CURRENT_CLI"
+if ! send_exit "$PANE_TARGET" "$CURRENT_CLI"; then
+    log "ERROR: 確認待ち等により /exit の打鍵を抑止した。CLI切替を中止する (${AGENT_ID}, pane=${PANE_TARGET})"
+    log "       ★モーダルへ答えるのは人である。当該paneを人が処理した後に再実行せよ。"
+    exit 3
+fi
 
 # Step 4: シェルプロンプトを待つ
 wait_for_shell_prompt "$PANE_TARGET"
 
 # Step 5: 新しいCLIコマンドを送信
+# ★ここでの pane は CLI 終了後のシェルである。ctx=shell で認証する。
+#   /exit 後に確認モーダル等へ遷移していた場合、この Enter が
+#   その選択を確定してしまう。入口の capture は後段の状態を証明せぬ。
 log "Launching new CLI: ${TARGET_CMD}"
-tmux send-keys -t "$PANE_TARGET" "$TARGET_CMD" 2>/dev/null || true
-sleep 0.3
-tmux send-keys -t "$PANE_TARGET" Enter 2>/dev/null || true
+if ! launch_new_cli "$PANE_TARGET" "$TARGET_CMD"; then
+    log "ERROR: 新CLIの起動打鍵を抑止した。CLI切替を中止する (${AGENT_ID}, pane=${PANE_TARGET})"
+    exit 3
+fi
 
 # Step 6: tmux pane metadata 更新
 DISPLAY_NAME=$(get_model_display_name "$AGENT_ID")

@@ -20,8 +20,10 @@
 
 set -euo pipefail
 
-# Ignore SIGINT — real CLIs handle C-c gracefully; mock must survive
-# inbox_watcher sends C-c before /clear to clear stale input.
+# Ignore SIGINT — real CLIs handle C-c gracefully; mock must survive C-c.
+# ★かつて inbox_watcher は /clear の前に C-c を送っていたが、cmd_754 E-1 で
+#   自動打鍵は全廃した。watcher は C-c も /clear も★送らない。この trap は
+#   人手(または試験ハーネス)が C-c を入力しても mock が死なぬための備えである。
 trap '' INT
 
 MOCK_CLI_TYPE="${MOCK_CLI_TYPE:-claude}"
@@ -262,7 +264,9 @@ while IFS= read -r input || true; do
         /new)
             # Codex /new: reset state but do NOT auto-process tasks.
             # Real Codex CLI loads AGENTS.md but does NOT trigger Session Start.
-            # Task processing requires an explicit startup prompt from inbox_watcher.
+            # Task processing requires an explicit startup prompt.
+            # ★cmd_754 E-1 以降、その startup prompt を与えるのは★人であり、
+            #   inbox_watcher ではない (watcher は /new も startup prompt も送らぬ)。
             echo "[mock] /new received — conversation reset (no auto-task)"
             STATE="idle"
             show_prompt "$MOCK_CLI_TYPE"
@@ -273,6 +277,7 @@ while IFS= read -r input || true; do
             ;;
         "Session Start"*)
             # Codex startup prompt: triggers full recovery + task execution
+            # ★cmd_754 E-1 以降、この入力は★人手で与えられる (watcher は送らぬ)。
             echo "[mock] Startup prompt received: ${input:0:60}..."
             # Check for assigned tasks (simulates Session Start procedure)
             # Note: no 'local' here — we're in main loop, not a function
@@ -287,8 +292,10 @@ while IFS= read -r input || true; do
             show_prompt "$MOCK_CLI_TYPE"
             ;;
         inbox*)
-            # inbox nudge received (e.g., "inbox3")
-            echo "[mock] Received nudge: $input"
+            # inboxN 入力を受けた (例: "inbox3")。
+            # ★cmd_754 E-1 以降、これを打つのは人(あるいは Claude の Stop hook が
+            #   本人へ未読を食わせた結果)であり、watcher の自動 nudge ではない。
+            echo "[mock] Received inbox input: $input"
             process_inbox
             show_prompt "$MOCK_CLI_TYPE"
             ;;

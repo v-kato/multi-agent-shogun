@@ -115,32 +115,16 @@ capture_tmux_pane_zoomed() {
     printf '%s' "$out"
 }
 
-capture_codex_status_snapshot() {
-    local pane="$1"
-    local restore_zoom=false
-    local was_zoomed="0"
-    local out=""
-
-    was_zoomed=$(timeout 2 tmux display-message -t "$pane" -p '#{window_zoomed_flag}' 2>/dev/null || echo "0")
-    if [[ "$was_zoomed" != "1" ]]; then
-        tmux resize-pane -t "$pane" -Z 2>/dev/null || true
-        restore_zoom=true
-        sleep 0.2
-    fi
-
-    tmux send-keys -t "$pane" '/status' 2>/dev/null || true
-    sleep 0.3
-    tmux send-keys -t "$pane" Enter 2>/dev/null || true
-    sleep 2
-
-    out=$(tmux capture-pane -t "$pane" -p -J -S -80 2>/dev/null || echo "")
-
-    if $restore_zoom; then
-        tmux resize-pane -t "$pane" -Z 2>/dev/null || true
-    fi
-
-    printf '%s' "$out"
-}
+# ★かつてここに capture_codex_status_snapshot() があり、Codex の稼働 pane へ
+#   `/status` + Enter を打ち込んで最新のクォータ表示を引き出していた。
+#   ★cmd_754 の裁定 E-1 により削除した。打ち込む先は agent CLI が動いて
+#   いる pane であり、その Enter が確認モーダルの既定選択肢を押し得る。
+#   2026-09-08 に実際に起きたのはまさにその事故である。
+#
+#   代償(正直に記す): pane に既に /status の出力が残っていない限り、Codex の
+#   クォータ(5h/週の残量・リセット時刻)は取得できず「?」表示になる。
+#   最新値が要るときは★人が当該 pane で /status を打てばよい。次回以降の
+#   本スクリプト実行がその出力を拾う。
 
 extract_latest_codex_status_block() {
     awk '
@@ -364,9 +348,12 @@ if [[ ${#CODEX_AGENTS[@]} -gt 0 ]]; then
             _status_out="$_pane_snapshot"
             _status_block=$(extract_latest_codex_status_block "$_status_out")
 
+            # ★/status を打ち込む fallback は廃止した (cmd_754 E-1)。
+            #   pane に残っている出力だけを読む。無ければ空のままとし、
+            #   下流で「?」として表示される。
             if [[ ! "$_status_block" =~ [0-9]+%[[:space:]]left ]]; then
-                _status_out=$(capture_codex_status_snapshot "$pane")
-                _status_block=$(extract_latest_codex_status_block "$_status_out")
+                echo "  (注) ${agent} の pane に /status の出力が見当たらぬ。Codexクォータは取得できず。" >&2
+                echo "       最新値が要るなら人手で当該paneへ /status を入力されたし (cmd_754により自動打鍵は廃止)。" >&2
             fi
 
             if [[ -n "$_status_block" ]]; then
@@ -559,7 +546,7 @@ if [[ ${#CODEX_AGENTS[@]} -gt 0 ]]; then
     printf "\n"
 
     # Quota display from /status
-    printf "  Quota (%s)\n" "${codex_model:-gpt-5.3-codex}"
+    printf "  Quota (%s)\n" "${codex_model:-gpt-6-sol}"
     if [[ -n "$CODEX_ACCT_5H_LEFT" ]]; then
         printf "  5h limit: %s%% left (resets %s)\n" "$CODEX_ACCT_5H_LEFT" "$(normalize_reset_value "$CODEX_ACCT_5H_RESET")"
     else

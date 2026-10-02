@@ -1,10 +1,21 @@
 #!/usr/bin/env bats
 # ═══════════════════════════════════════════════════════════════
-# E2E-010: /clear + idle flag recovery
+# E2E-010: idle フラグの生成・保持と、誤 busy からの復帰
 # ═══════════════════════════════════════════════════════════════
-# Validates:
-#   A) /clear processing restores idle flag (IDLE_FLAG_DIR)
-#   B) stale busy recovery can force idle flag creation
+# ★契約の改訂 (cmd_754 E-1 / 2026-09-08):
+#   本ファイルは元来「watcher が /clear を送り、その処理を経て idle フラグが
+#   戻る」ことを検査していた。自動打鍵は★全廃したため、その経路は無い。
+#
+#   打鍵が消えても idle フラグ自体は要る。フラグは「Stop hook に委ねてよいか」
+#   「滞留時計を進めてよいか」の判断に使われ続けるからである。むしろ打鍵が
+#   無くなった今、フラグを消す経路(旧: nudge 送信後の削除)も消えた。
+#
+#   本ファイルが確かめるもの:
+#     A) 起動時に初期 idle フラグが作られ、未配送の周期を跨いでも消えない
+#     B) 誤 busy が長引いたときフラグを強制生成し、滞留を人経路へ倒す
+#   ★どちらの試験でも「タスクが done になる」ことは期待しない。誰も打鍵
+#     せぬ以上 mock は動かぬ。それが裁定どおりの帰結である。
+#   正本: docs/delivery_channels.md
 # ═══════════════════════════════════════════════════════════════
 
 # bats file_tags=e2e
@@ -57,12 +68,13 @@ wait_for_log() {
         elapsed=$((elapsed + 1))
     done
     echo "TIMEOUT: '$pattern' not found in $log_file after ${timeout}s" >&2
+    cat "$log_file" >&2 2>/dev/null || true
     return 1
 }
 
-# ═══ E2E-010-A: /clear後にidle flagが作成される ═══
+# ═══ E2E-010-A: 初期 idle フラグは生成され、未配送の周期を跨いでも消えない ═══
 
-@test "E2E-010-A: /clear recovery creates idle flag" {
+@test "E2E-010-A: 起動時に idle フラグが作られ、未配送の周期を跨いでも消えぬ" {
     local ashigaru1_pane
     ashigaru1_pane=$(pane_target 1)
     local flag_dir log_file watcher_pid
@@ -82,22 +94,37 @@ wait_for_log() {
     )
     sleep 1
 
+    # 1. 起動時に初期フラグが作られる (welcome 画面での誤 busy を防ぐため)
+    run wait_for_log "$log_file" "Created initial idle flag for ashigaru1"
+    assert_success
+    run wait_for_file_within "$ashigaru_idle_flag" 10
+    assert_success
+
+    # 2. clear_command が届いても★送られない。未読のまま保持される。
     bash "$E2E_QUEUE/scripts/inbox_write.sh" "ashigaru1" \
         "/clear" "clear_command" "karo"
 
-    run wait_for_yaml_value "$E2E_QUEUE/queue/tasks/ashigaru1.yaml" "task.status" "done" 45
+    run wait_for_log "$log_file" "[NO-AUTO-SEND] ashigaru1: CLIコマンド(/clear)は自動では送らぬ"
+    assert_success
+    run assert_inbox_unread_count "$E2E_QUEUE/queue/inbox/ashigaru1.yaml" 1
     assert_success
 
-    run wait_for_file_within "$ashigaru_idle_flag" 10
+    # 3. 未配送の周期を何度か跨いでもフラグは消えない
+    #    (旧契約では nudge 送信後にフラグを削除していた。その経路ごと無い)
+    sleep 8
+    [ -f "$ashigaru_idle_flag" ]
+
+    # 4. 誰も /clear を打たぬゆえ mock は context reset せず、タスクは assigned のまま
+    run wait_for_yaml_value "$E2E_QUEUE/queue/tasks/ashigaru1.yaml" "task.status" "assigned" 10
     assert_success
 
     stop_inbox_watcher "$watcher_pid"
     rm -rf "$flag_dir"
 }
 
-# ═══ E2E-010-B: stale busy recovery forces idle flag ═══
+# ═══ E2E-010-B: 誤 busy が長引けばフラグを強制生成し、滞留を人へ倒す ═══
 
-@test "E2E-010-B: stale busy recovery forces idle flag creation" {
+@test "E2E-010-B: stale busy 復帰でフラグを強制生成し、滞留を人経路へ倒す" {
     local ashigaru1_pane
     ashigaru1_pane=$(pane_target 1)
     local flag_dir log_file watcher_pid first_unread_seen
@@ -125,13 +152,26 @@ wait_for_log() {
         echo $!
     )
 
+    # 1. busy が5分を超えて続けば、誤 busy とみなしフラグを強制生成する
     run wait_for_log "$log_file" "forcing idle flag"
     assert_success
 
     run wait_for_file_within "$ashigaru_idle_flag" 10
     assert_success
 
-    run wait_for_yaml_value "$E2E_QUEUE/queue/tasks/ashigaru1.yaml" "task.status" "done" 45
+    # 2. 誤 busy から復帰しても打鍵はしない。猶予超過の滞留は人経路へ倒す。
+    run wait_for_log "$log_file" "猶予超過。自動打鍵は行わず人経路へ倒す"
+    assert_success
+    run wait_for_log "$log_file" "人手で当該paneをご確認くだされ"
+    assert_success
+
+    # 3. copilot には Stop hook も self-watch も無い。打鍵ログは一つも無い。
+    run grep -qE "\[SEND-KEYS\]" "$log_file"
+    [ "$status" -ne 0 ]
+
+    # 4. 誰も打鍵せぬゆえタスクは assigned のまま
+    #    (旧試験はここで done を期待していた。/clear 送信が前提だったためである)
+    run wait_for_yaml_value "$E2E_QUEUE/queue/tasks/ashigaru1.yaml" "task.status" "assigned" 10
     assert_success
 
     stop_inbox_watcher "$watcher_pid"

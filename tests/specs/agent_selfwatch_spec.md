@@ -11,6 +11,39 @@
 
 ---
 
+## 0. ★現契約の注記 (cmd_754 / 2026-09-08 改訂)
+
+本仕様書は cmd_107 当時、**「平常時は nudge を減らし、異常時は send-keys で
+復旧する」** という前提で書かれていた。その前提は★失効した。
+
+2026-09-08、確認モーダル表示中の pane へ inbox_watcher が nudge を送り、その
+Enter が既定選択肢 `❯ 1. Yes` を選んで D002-E1 違反の削除が実際に実行された。
+以後4世代にわたり「画面から安全を証明する」試みを重ねたが4度とも破れ、将軍は
+★**自動打鍵の安全集合を空とする**裁定を下した (E-1)。
+
+現契約:
+
+| CLI | Stop hook | agent self-watch | 自動打鍵 | 実際に配送を担うもの |
+|-----|-----------|------------------|----------|----------------------|
+| claude | ○ 実在 | ✕ 実在せぬ | ✕ 廃止 | **Stop hook のみ**(最大55秒の窓の内側だけ) |
+| codex | ✕ 無い | ✕ 実在せぬ | ✕ 廃止 | ★**無い → 人経路** |
+| opencode | ✕ 無い | ✕ 実在せぬ | ✕ 廃止 | ★**無い → 人経路** |
+| copilot | ✕ 無い | ✕ 実在せぬ | ✕ 廃止 | ★**無い → 人経路** |
+| kimi | ✕ 無い | ✕ 実在せぬ | ✕ 廃止 | ★**無い → 人経路** |
+
+- ★`tmux send-keys` は**平常時も異常時も0**である。「最終手段としての打鍵」は
+  存在しない。エスカレーションの段階は**「人へ上げるまでの猶予」だけ**を表す。
+- ★agent 自前の self-watch は**実在しない**(2026-09-08 実測)。配送経路として
+  数えてはならぬ。
+- ★`clear_command` / `model_switch` / `cli_restart` は**自動では送られない**。
+  `read: false` のまま保持され、人が当該 pane へ入力するまで実行されない。
+- 正本: `docs/delivery_channels.md`
+
+以下の FR/NFR・TC の期待値は、この現契約に同期済みである。TC ID は
+トレーサビリティ維持のため変更していない。
+
+---
+
 ## 1. 目的
 
 本仕様書は、`reports/requirements_agent_selfwatch.md` で定義された FR/NFR を、
@@ -55,16 +88,16 @@
 
 | TC ID | 要件 | レベル | 観点 | 期待値 |
 |---|---|---|---|---|
-| TC-FR-008 | FR-008 通常nudge停止 | L2 | send-keys削減 | 通常メッセージで `send-keys inboxN` が実行されない |
-| TC-FR-009 | FR-009 特殊コマンド互換 | L1/L2 | 互換性 | `clear_command`/`model_switch` の既存挙動を維持 |
+| TC-FR-008 | FR-008 nudge全廃 | L1/L2 | send-keys不在 | ★あらゆるメッセージで `send-keys` が実行されない(実コードに1つも存在しない) |
+| TC-FR-009 | FR-009 特殊コマンドの保持契約 | L1/L2 | 未送信時の扱い | `clear_command`/`model_switch`/`cli_restart` は★自動送信されず `read: false` のまま保持され、滞留として数えられる(既読化は送信確定・恒久skip・終端skipのときだけ) |
 | TC-FR-010 | FR-010 summary-first | L1 | fast-path | unread_count=0時にfull read回避、必要時のみfull read |
 
 ### 3.3 Phase 3
 
 | TC ID | 要件 | レベル | 観点 | 期待値 |
 |---|---|---|---|---|
-| TC-FR-011 | FR-011 send-keys最終手段化 | L2/L3 | 復旧限定 | 平常時send-keys利用0、異常時のみ発火 |
-| TC-FR-012 | FR-012 閾値再定義 | L1/L2 | エスカレーション | 閾値/cooldownに従い過剰復旧ループが発生しない |
+| TC-FR-011 | FR-011 send-keys全廃 | L1/L2 | 打鍵の不在 | ★平常時も異常時も send-keys 利用0。復旧経路は人経路(家老inbox → dashboard 🚨要対応、家老/将軍が対象なら ntfy)のみ |
+| TC-FR-012 | FR-012 閾値再定義 | L1/L2 | エスカレーション | 閾値/cooldownは「人へ上げるまでの猶予」を表し、打鍵の強度を表さない。★特殊命令のみの未読でも閾値へ到達し、人へ一度は上がる |
 | TC-FR-013 | FR-013 代替IPC評価フック | L1 | 拡張性 | YAML正本を崩さずPoC導入/撤回が可能 |
 
 ### 3.4 共通
@@ -127,14 +160,17 @@
 
 ## 5.4 エスカレーション
 
-- UT-ESC-001: unread ageに応じたPhase1/2/3遷移
-- UT-ESC-002: cooldownで `/clear` 連打を抑制
-- UT-ESC-003: busy時はnudge defer
-- UT-ESC-004: self-watch有効時はnudge送信スキップ
+- UT-ESC-001: unread age に応じた段階遷移(★遷移するのは「人へ上げるまでの猶予」であって打鍵の強度ではない)
+- UT-ESC-002: cooldown で★人への通知が連打されない(旧「/clear 連打の抑制」は /clear を送らぬため消滅)
+- UT-ESC-003: busy 時は滞留時計を進めない(Claude は Stop hook が拾うため)
+- UT-ESC-004: ★self-watch は実在しないため、配送経路として数えない。Claude のみ Stop hook へ委ねる
+- UT-ESC-005: ★特殊命令のみが未読のとき、未配送カウンタがリセットされず複数周期で閾値へ到達する (cmd_754 redo1)
+- UT-ESC-006: 全未読(特殊命令を含む)が0になったときだけ未配送カウンタがリセットされる
 
 期待値:
-- 時間条件に応じた期待アクションのみ発火
-- busy/self-watch条件で誤送信なし
+- 時間条件に応じて★人経路へ上がる。打鍵は一切発火しない
+- 特殊命令のみの滞留が「未読が捌けた」と誤認されない
+- 未配送の連続回数が閾値へ到達し、人が必ず一度は知る
 
 ---
 
@@ -142,8 +178,8 @@
 
 - IT-001: watcher + agent + inbox_write の連携
 - IT-002: CLI別分岐（claude/codex/copilot）
-- IT-003: 通常経路でsend-keys不要化（Phase2）
-- IT-004: 障害注入時の最終復旧（Phase3）
+- IT-003: ★全経路で send-keys 不在(通常・異常を問わず)
+- IT-004: 障害注入時の復旧が★人経路(dashboard 🚨要対応 / ntfy)へ倒れること
 
 期待値:
 - ユニットでは見えない境界不整合が解消される
@@ -162,7 +198,8 @@
 
 期待値:
 - 組織階層運用での実運用成立
-- /clear依存が過剰に増えない
+- ★context reset は人が入力する前提で運用が回る(watcher は送らない)
+- 届かぬ滞留が人経路へ確実に上がる
 - 主要メトリクスが許容範囲に収まる
 
 ---
@@ -198,7 +235,7 @@
 | Step 2: 家老/足軽の監視プロセスが稼働中 | `pgrep -af \"inbox_watcher.sh|inotifywait\"` を実行する。 | 監視プロセスが確認できる。 | 監視が見えない場合は watcher 再起動後、`logs/` の直近エラーを確認。 | `tests/results/e2e_cmd117_step02_watchers.txt` |
 | Step 3: E2E開始前に未読滞留が暴発していない | `for f in queue/inbox/*.yaml; do c=$(awk '/read: false/{n++} END{print n+0}' \"$f\"); echo \"$(basename \"$f\"):$c\"; done` を実行する。 | 実施対象エージェントの未読が許容範囲（原則0）である。 | 未読>0が残る場合は先に通常処理を完了させ、再度Step 3を実行。 | `tests/results/e2e_cmd117_step03_unread_baseline.txt` |
 | Step 4: E2E-001（Shogun→Karo→Ashigaru全系統）を起動 | `bash scripts/inbox_write.sh karo \"cmd117_e2e_probe: chain test\" cmd_new shogun` を送信し、家老の処理と足軽タスク配備を確認する。 | 家老inboxが処理され、少なくとも1足軽へタスクが流れる。 | 2分以上変化がない場合は `queue/inbox/karo.yaml` と `logs/inbox_watcher/` を確認し、Phase 2/3 エスカレーション条件を点検。 | `tests/results/e2e_cmd117_step04_chain.md` |
-| Step 5: E2E-002（redo/clear系）を検証 | 対象足軽へ `clear_command` を送る（例: `bash scripts/inbox_write.sh ashigaru6 \"cmd117_e2e_probe redo\" clear_command karo`）し、回復フローを確認する。 | `/clear` 後に対象足軽が task YAML を再読込し、停止せず復帰する。 | 復帰しない場合は `queue/inbox/ashigaru6.yaml` の `read` 更新と task status を確認し、race有無を点検。 | `tests/results/e2e_cmd117_step05_redo_clear.md` |
+| Step 5: E2E-002（redo/context reset系）を検証 | 対象足軽へ `clear_command` を送る（例: `bash scripts/inbox_write.sh ashigaru6 \"cmd117_e2e_probe redo\" clear_command karo`）。★watcher は自動では送らぬため、**殿ご自身が当該 pane へ context reset を入力**する（Claude/Copilot/Kimi → `/clear`、Codex/OpenCode → `/new`）。 | 送信直後は当該メッセージが `read: false` のまま保持され、滞留が家老 inbox（家老/将軍が対象なら ntfy）へ上がる。★殿が context reset を入力した後、対象足軽が task YAML を再読込し停止せず復帰する。 | 滞留通知が上がらない場合は `logs/inbox_watcher/` の `[NO-AUTO-SEND]` 行と未配送連続回数を確認。復帰しない場合は `queue/inbox/ashigaru6.yaml` の `read` 更新と task status を確認。★`read: true` へ勝手に変わっていたら「届かぬ命令を既読にした」不具合である。 | `tests/results/e2e_cmd117_step05_redo_clear.md` |
 | Step 6: E2E-003（9エージェント並列安定性）を確認 | `tmux list-panes -t multiagent -F '#{pane_index}:#{pane_current_command}'` と Step 3 を再実行し、並列稼働中の滞留を確認する。 | 多重稼働でも未読滞留が連続増加しない。 | 滞留が増える場合は busy-skip/cooldown 条件の誤設定を確認し、該当agentログを採取。 | `tests/results/e2e_cmd117_step06_parallel_health.txt` |
 | Step 7: E2E完了判定を記録 | `tests/results/e2e_cmd117_readiness.md` に E2E-001/002/003 の PASS/FAIL、阻害要因、再試行計画を記載する。 | 殿が次アクションを即決できる判定記録が完成する。 | 判定根拠が不足する場合は不足証跡を再取得してから記録を確定する。 | `tests/results/e2e_cmd117_readiness.md` |
 

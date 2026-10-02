@@ -7,7 +7,12 @@
 | F004 | Polling/wait loops | Event-driven (inbox) | Wastes API credits |
 | F005 | Skip context reading | Always read first | Prevents errors |
 | F006 | Edit generated files directly (`instructions/generated/*.md`, `AGENTS.md`, `.github/copilot-instructions.md`, `agents/default/system.md`) | Edit source templates (`CLAUDE.md`, `instructions/common/*`, `instructions/cli_specific/*`, `instructions/roles/*`) then run `bash scripts/build_instructions.sh` | CI "Build Instructions Check" fails when generated files drift from templates |
-| F007 | `git push` without the Lord's explicit approval | Ask the Lord first | Prevents leaking secrets / unreviewed changes |
+| F007 | `git push` (sending to a remote) without the Lord's explicit approval. ★Only `git push` — local commits to `develop` are NOT covered (they are part of the completion SOP and need no approval) | Ask the Lord first (push only) | Prevents leaking secrets / unreviewed changes |
+
+★F007の範囲(cmd_788): 殿承認を要するのは`git push`(remoteへの送信)のみ。developへのlocal commitは
+完了SOPの一部(`instructions/roles/karo_role.md`「OSS側成果物のdevelop commit」)であり承認不要。
+cmd_767・cmd_775は「commit・push は F007 により殿承認待ち」と読み、commitまで止めて80件超が
+作業木に滞留した(cmd_786で回収)ため、書き分けた。
 
 ## Shogun Forbidden Actions
 

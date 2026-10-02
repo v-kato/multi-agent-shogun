@@ -5,12 +5,16 @@
 # Validates the redo protocol:
 #   1. Initial task completes (status: done, report written)
 #   2. New task YAML written with redo_of field
-#   3. /clear sent directly to agent (simulates inbox_watcher clear_command)
+#   3. ★人手で /clear が入力される (cmd_754 E-1 以降、clear_command は
+#      watcher から自動送信されない。read:false のまま保持され、人が当該
+#      pane へ入力するまで実行されぬ)
 #   4. Agent resets, reads new task YAML, processes redo task
 #   5. New report written with new task_id
 #   6. redo_of field preserved in task YAML
 #
-# Uses direct /clear via send_to_pane (no inbox_watcher needed).
+# 本試験は send_to_pane で /clear を直接打つ。これは★人の打鍵の模擬であり、
+# inbox_watcher の配送ではない (watcher は打鍵を一つも持たぬ)。
+# 正本: docs/delivery_channels.md
 # ═══════════════════════════════════════════════════════════════
 
 # bats file_tags=e2e
@@ -53,7 +57,7 @@ setup() {
 
     # ─── Phase 1: Complete initial task ───
 
-    # 1. Place initial task and process via direct nudge
+    # 1. Place initial task and process via 人手模擬の inbox1 入力
     cp "$PROJECT_ROOT/tests/e2e/fixtures/task_ashigaru1_basic.yaml" \
        "$E2E_QUEUE/queue/tasks/ashigaru1.yaml"
 
@@ -85,7 +89,8 @@ task:
   timestamp: "2026-01-01T01:00:00"
 EOF
 
-    # 5. Send /clear directly (simulates inbox_watcher clear_command delivery)
+    # 5. /clear を直接打つ (★人手による入力の模擬。watcher は clear_command を
+    #    自動送信せず、read:false のまま保持する — cmd_754 E-1)
     send_to_pane "$ashigaru1_pane" "/clear"
 
     # 6. Wait for redo task to complete
@@ -108,7 +113,7 @@ EOF
     local ashigaru1_pane
     ashigaru1_pane=$(pane_target 1)
 
-    # 1. Complete initial task via direct nudge
+    # 1. Complete initial task via 人手模擬の inbox1 入力
     cp "$PROJECT_ROOT/tests/e2e/fixtures/task_ashigaru1_basic.yaml" \
        "$E2E_QUEUE/queue/tasks/ashigaru1.yaml"
 
@@ -135,7 +140,8 @@ task:
   timestamp: "2026-01-01T01:00:00"
 EOF
 
-    # 4. Send /clear directly (simulates inbox_watcher clear_command delivery)
+    # 4. /clear を直接打つ (★人手による入力の模擬。watcher は clear_command を
+    #    自動送信せず、read:false のまま保持する — cmd_754 E-1)
     send_to_pane "$ashigaru1_pane" "/clear"
 
     # 5. Wait for redo task to complete

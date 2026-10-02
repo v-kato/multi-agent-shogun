@@ -241,6 +241,30 @@ PYEOF
     [[ "$output" == *"provider-qualified model IDs are ambiguous without --type"* ]]
 }
 
+@test "switch_cli.sh: --model gpt-6-luna(type未指定) → codex型に自動判定される (cmd_783)" {
+    run bash "${PROJECT_ROOT}/scripts/switch_cli.sh" ashigaru1 --model gpt-6-luna
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Auto-inferred type=codex from model=gpt-6-luna"* ]]
+}
+
+@test "switch_cli.sh: --model gpt-reserve(type未指定) → codex型に自動判定される (cmd_783)" {
+    run bash "${PROJECT_ROOT}/scripts/switch_cli.sh" ashigaru1 --model gpt-reserve
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Auto-inferred type=codex from model=gpt-reserve"* ]]
+}
+
+@test "switch_cli.sh: --model gpt-6-sol(type未指定) → codex型に自動判定される (cmd_783)" {
+    run bash "${PROJECT_ROOT}/scripts/switch_cli.sh" ashigaru1 --model gpt-6-sol
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Auto-inferred type=codex from model=gpt-6-sol"* ]]
+}
+
+@test "switch_cli.sh: --model fable(type未指定) → claude型に自動判定される (cmd_783)" {
+    run bash "${PROJECT_ROOT}/scripts/switch_cli.sh" ashigaru1 --model fable
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Auto-inferred type=claude from model=fable"* ]]
+}
+
 # =============================================================================
 # get_model_display_name 統合テスト（switch_cli.sh が依存する表示名）
 # =============================================================================
