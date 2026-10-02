@@ -80,6 +80,14 @@ privategitの日常運用ルール(commit/push手順)は
   EOLへ戻すことで、意図した1行追加だけを残した。★この事例は
   「自己確認手順が実際に効いた」実例でもある——手順を踏んだ結果
   として乖離を検知でき、範囲を特定して復元できた。
+- 判定の道具(cmd_800): `python3 scripts/crlf_diff_check.py --rev <編集前の
+  rev> <file>...`(`--rev` 省略時は HEAD)。読み取り専用で、判定するだけで
+  直さない。上の numstat の突き合わせに加え、内容が変わっていない行が参照版
+  (checkout 変換後の内容)と行末まで byte 一致することを確かめ、CRLF/LF の
+  行数・LF のみの行の行番号・最初の差分位置を出す。終了コードは 0=健全 /
+  1=行末だけ変わった行がある・numstat が一致しない / 2=対象 0 本・rev 未解決・
+  参照版にファイルが無い等(沈黙して 0 を返さない)。`.gitattributes` の eol
+  変換などで git の numstat が行末の差を見ない場合も、byte 比較で捕まえる。
 
 ## ④ 使い捨てディレクトリは mktemp -d を既定とする
 
@@ -95,6 +103,14 @@ cmd_732のprobe2自己申告違反の原因は、CLAUDE.mdの条文の不備で�
 - 本節は足軽向けの実行ルールである。`instructions/` は足軽の常時
   読込経路ではないため、CLAUDE.md本体側の簡潔な1節が一次情報である。
   本ファイルは詳細・経緯の補足に位置づける。
+- Bats は `bash scripts/bats_tmpdir_guard.sh <bats の引数>` 経由で起動する
+  (cmd_800)。TMPDIR が未設定か `/` で始まる時だけ bats を起動し、引数は
+  そのまま渡す。相対の TMPDIR(空文字を含む)なら bats を起動せず、理由を
+  出して終了コード 2 で止まる。template 無しの `mktemp -d` は TMPDIR の下に
+  作るため、相対の TMPDIR では相対パスを返し、teardown の `rm -rf` が
+  D002-E1(d) の外へ落ちる。試験のコード側で TMPDIR に依らず絶対パスに
+  したいときは、`mktemp -d /tmp/<名前>.XXXXXX` のように絶対リテラルの
+  template を与える。
 
 ## ⑤ D007(mount/umount絶対禁止)下でのマウント状況確認手段
 
@@ -220,6 +236,35 @@ Claude Code の hook は「cwd follows Claude」で実行される——hook の
   隔離tmux実機・相対失敗/絶対成功の対比)と `tests/unit/
   test_permission_request_hook_settings.bats` の T-PRHS-003(静的・
   settings.json の command 文字列を直接検査)。
+
+## ⑩ 公開originへのpushは `oss_publish.sh` から——引数なし `git push` の手癖(cmd_798)
+
+公開originへ載せる経路は、専用の公開道具(`skills/shogun-oss-publish/
+scripts/oss_publish.sh`)を通すものだけである。mainの集約は `prepare`、
+上流向けPRは `prepare-pr` →それぞれ殿承認→`push`。手書きの
+`git push` で公開originへ送らない。developはローカルの作業幹で、
+originにdevelopは無い(F007・`instructions/common/forbidden_actions.md`)。
+
+- 事故類型1(引数なし `git push`): developがorigin/developを追跡して
+  いた頃、歯止めの無い状態で引数なしの `git push` を打つと、生の
+  develop先端がそのままorigin/developへ載った(cmd_798の偽originで
+  実測・rc=0)。gitは送り先も送るbranchも確かめず、何も言わずに
+  成功する。手癖の一打で生の履歴が公開される。
+- 事故類型2(予行の中の強制push): cmd_797では、偽origin(`mktemp -d`
+  のローカルbare repo)に対する予行のスクリプトが、巻き戻しの段で
+  lease付きの強制pushを使っており、「force系を書かず実行せず」の
+  指示に反して1回実行された(実originには繋がっておらず、本人が
+  申告した)。送り先が偽物でも、force系を書いた道具は走らせない。
+  走らせる前にスクリプトの中身を読んで確かめる。
+- 今は道具が止める: `push.default=nothing`(引数なしpushをgitが拒否)、
+  upstreamのpushurlの無効化、pre-push hook(送り先・名前・内容・
+  ticketの検査)。止める対象は手癖と取り違えであり、意図的に外す操作
+  (`--no-verify`・`core.hooksPath`の書換え等)は止めない。止まる
+  ことを当てにして試さない。
+- 道具は黙る: hookが無いとgitは素通しにする。実行bitが無い場合も、
+  hintを出すだけでpushは止めない。`oss_guard_install.sh --check` を、
+  集約公開の前と完了SOPの③bの前に通す(`oss_publish.sh` は内部で通す)。
+- 詳細(規則R0〜R5・限界・設置と巻き戻し)は同skillの SKILL.md を見よ。
 
 ## 関連
 

@@ -309,6 +309,16 @@ YAML
     [ "$(normalize_opencode_model claude-sonnet-4-6)" = "anthropic/claude-sonnet-4-6" ]
 }
 
+# cmd_799 ⑥: ドット付きの版(現行の軍師モデル名 gpt-6.1-sol 等)も openai/ に正規化される。
+# これは provider の付与であり codex 型の自動判定(switch_cli.sh Step 0.5)とは目的が別で、
+# gpt-* を広く openai/ へ寄せる。scripts/build_instructions.sh 内の同名の正規化とも同じ結果になる。
+@test "normalize_opencode_model: cmd_799 ドット付きの版(gpt-6.1-sol / gpt-6.2-luna)も openai/ に正規化される" {
+    load_adapter_with "${TEST_TMP}/settings_opencode.yaml"
+    [ "$(normalize_opencode_model gpt-6.1-sol)" = "openai/gpt-6.1-sol" ]
+    [ "$(normalize_opencode_model gpt-6.2-luna)" = "openai/gpt-6.2-luna" ]
+    [ "$(normalize_opencode_model gpt-5.6-sol)" = "openai/gpt-5.6-sol" ]
+}
+
 @test "normalize_opencode_model: provider-qualified と未知モデルはそのまま" {
     load_adapter_with "${TEST_TMP}/settings_opencode.yaml"
     [ "$(normalize_opencode_model anthropic/claude-sonnet-4-6)" = "anthropic/claude-sonnet-4-6" ]

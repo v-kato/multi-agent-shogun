@@ -90,7 +90,7 @@ usage() {
     echo ""
     echo "  agent_id   Agent configured in config/settings.yaml (e.g. karo, ashigaru1, gunshi)"
     echo "  --type     claude | codex | copilot | kimi | opencode"
-    echo "  --model    fable | sonnet | opus | gpt-6-sol | gpt-6-luna | openai/gpt-5.4-mini | etc."
+    echo "  --model    fable | sonnet | opus | gpt-6-sol | gpt-6.1-sol | gpt-6-luna | openai/gpt-5.4-mini | etc."
     echo "  --variant  OpenCode model variant such as xhigh, high, max, minimal"
     echo "  --human-initiated  ★必須。人が今この切替を命じ、当該paneを見ていることの表明。"
     echo "                     これ無しでは打鍵しない (cmd_754 将軍裁定 E-1)。"
@@ -557,7 +557,9 @@ log "=== Starting CLI switch for ${AGENT_ID} (pane: ${PANE_TARGET}) ==="
 # Step 0.5: --model指定時に--type未指定なら、CLI種別を安全に補完する
 if [[ -n "$NEW_MODEL" && -z "$NEW_TYPE" ]]; then
     case "$NEW_MODEL" in
-        gpt-5.3-codex*|gpt-5-codex*|gpt-5.6-*|gpt-6-*|gpt-reserve)
+        # gpt-6 系は世代の直後が '-' か '.' のものだけ(gpt-6-sol / gpt-6.1-sol)。
+        # 'gpt-6*' まで緩めると gpt-60・gpt-6x 等の別系統名も codex と誤判定する。
+        gpt-5.3-codex*|gpt-5-codex*|gpt-5.6-*|gpt-6-*|gpt-6.*|gpt-reserve)
             NEW_TYPE="codex"
             log "Auto-inferred type=codex from model=${NEW_MODEL}"
             ;;

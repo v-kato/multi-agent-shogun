@@ -211,7 +211,37 @@ archiveへ移動してしまう事故が発生している。いずれも移し�
 ★通ってよい道(禁止だけを書かず併記する): 家老の完了3連SOPは、★step 0として
 「OSS側成果物のdevelop commit」(軍師QC PASS後・done化の前。下記の節・cmd_788)を
 済ませたうえで、上記1のstatus更新に続けて dashboard✅戦果への記載 →
-privategit commit/push → ntfy送信、までである。archiveへの実移動は将軍が別途行う。
+privategit add → 二重追跡の検査(`--index`) → privategit commit/push →
+③b 生の履歴の退避(`oss_raw_backup.sh`) → ntfy送信、までである。
+archiveへの実移動は将軍が別途行う。
+
+privategitの部分は次の順で行う(cmd_798。道具は privategit が追跡する私的skill
+`skills/shogun-oss-publish/` にあり、使い方の正本は同skillの SKILL.md)。privategitの操作は家老のみ。
+
+```bash
+privategit add -f context/ queue/ config/ memory/ dashboard.md logs/dashboard_archive/ skills/   # 予定pathをstage(従来どおりの7path)
+bash skills/shogun-oss-publish/scripts/oss_dual_track_check.sh --index                             # 二重追跡の検査(addの後・commitの前)
+#   rc=1 許可外の二重追跡がstageされている → 出た一覧を privategit rm --cached <path> で外して検査からやり直す
+#   rc=3 許可一覧の本文が公開developと違う → privategit add -f <その path> で公開側の本文へ同期して検査からやり直す
+#   rc=2 使い方・環境の誤り → 原因を直して検査からやり直す
+privategit commit -m "cmd_XXX完了: <内容の簡潔な説明>"                                             # 検査が rc=0 のときだけ
+privategit push
+bash skills/shogun-oss-publish/scripts/oss_guard_install.sh --check                                # 歯止めの点検(③bの前)
+bash skills/shogun-oss-publish/scripts/oss_raw_backup.sh                                           # ③b 生の履歴の退避
+```
+
+- **二重追跡の検査**: 公開側とprivategitの両方が追跡してよいのは許可一覧(`dual_track_allowlist.txt`)
+  の本文が同一の16本だけで、持ち主は公開側である。検査は**これからcommitする候補index**に対して
+  行う(`--index`)。rc≠0ならcommitしない。`--head`(commit済みの木の棚卸し)を代わりに使わない
+  (候補indexに再び混入した追跡を見逃す)。引数なしは使い方違反(rc=2)。
+- **③b 退避**: ローカルの`develop`と保管branch(`local-archive/*`)を、privateの`oss/*`へ
+  fast-forwardだけで控える(force系なし)。毎cmdのprivategit pushの後に行い、集約公開の前後にも
+  行う(未退避のdevelop先端は集約公開の`prepare`が拒否する)。privateへのpushなのでF007の対象外
+  (privategit pushと同じ扱い・承認不要)。退避が失敗しても完了SOP自体は止めず、dashboardへ記録して
+  再試行する。非FFで止まった(developが書き換えられた)ときは上申する。
+- **③bの前の点検**: 歯止め(pre-push hook)が失われていても、gitは警告せず素通しにする。
+  毎cmdの③bを定期の検出点にする。`oss_guard_install.sh --check`がNGなら、dashboard 🚨要対応へ
+  記録して上申する(再設置は別指示)。③bの退避は公開originへの経路を使わないので、NGでも行う。
 
 This keeps the active file small and readable. `pending`・
 `in_progress`・`paused` の3ステータスが active file に残り、`done`・
@@ -229,13 +259,25 @@ To resume a paused cmd, Karo sets its status back to `in_progress`
 
 ### OSS側成果物のdevelop commit(★完了SOP step 0・cmd_788)
 
-origin(公開リポジトリ)へ載る成果物を、cmdごとにdevelopへ残す手順。背景(cmd_786):
+origin(公開リポジトリ)へいずれ集約公開する成果物を、cmdごとにローカルのdevelopへ残す手順。
+
+★developの位置づけ(cmd_798): developはこの機械のローカル作業幹であり、originにdevelopは無い
+(公開originが持つのはmain〈集約幹〉と上流向けPR用branch・旧mainの退避だけ)。生の履歴(developと
+保管branch `local-archive/*`)は、完了SOPの③b(`oss_raw_backup.sh`・上記)でprivateの`oss/*`へ
+退避する。公開originへ載せるのは専用の公開道具(`skills/shogun-oss-publish/scripts/oss_publish.sh`)
+を通す経路だけで、mainの集約は`prepare`、上流向けPRは`prepare-pr`→それぞれ殿承認→`push`とし、
+1回ごとにF007。developや`local-archive/*`を公開originへpushしない
+(pre-push hookと`push.default=nothing`が機械的にも止める)。developはamend・rebaseしない
+(③bの退避はfast-forwardだけなので、書き換えると止まる)。
+
+背景(cmd_786):
 cmd_763(9/11)以降の約2週間、80件超のOSS側成果物がdevelopへcommitされず作業木にしか
 無かった。真因は3つ ―― (1)完了SOPに「誰が・いつ・何をcommitするか」が無かった、
 (2)F007(pushの殿承認)をcommitまで承認待ちと誤読して止まった、(3)新規ファイルが
 `.gitignore`ホワイトリストで`git status`に現れず棚卸しから漏れた。
 privategit(`queue/`・`context/`・`config/`・`memory/`・dashboard等)のcommitはOSS追跡
-ファイルを含まないため、この手順の代わりにならない。
+ファイルを含まないため、この手順の代わりにならない(例外は二重追跡の許可一覧16本。持ち主は公開側で、
+privategitには公開developと同一の本文が入るだけである。上記の`--index`検査を参照)。
 
 | 項目 | 規則 |
 |------|------|
@@ -245,7 +287,7 @@ privategit(`queue/`・`context/`・`config/`・`memory/`・dashboard等)のcommi
 | 対象 | 当該cmd由来のファイルのみ。他cmdの進行中の変更・OSS非対象物(privategit専用のskill・下記「OSS非対象の試験」等)は含めない。OSS側成果物が無いcmd(調査・privategit側のみ等)は「対象なし」を報告とdashboardに明記してstep 0を省く。 |
 | `git add` | ★path明示のみ。`git add -A`・`git add .`・`git commit -a`は禁止。`.gitignore`の`!*/`と同名許可行が、除外3ディレクトリ(`node_modules/`・`tmp/`・privategit専用のskill配下)の同名ファイルまでignore解除し、`git add -A`では計104ファイルが混入する(cmd_786実測)。 |
 | message | 日本語・cmd_id・機能名のみ(例: `cmd_NNN完了: <機能名>`)。個別業務由来の固有名詞(取引先・案件・商品・倉庫等)や`v-sync.co.jp`以外の業務繋がりのアドレスを書かない。cmd_idは書いてよい。 |
-| push | **含めない**。F007が殿承認を要するのは`git push`のみ。developへのlocal commitは承認不要。 |
+| push | **含めない**。originにdevelopは無く、developはpushしない。公開originへ載せるのは集約公開(`oss_publish.sh`)だけで、1回ごとにF007(殿承認)。developへのlocal commitと、③bのprivateへの退避は承認不要。 |
 
 gate(追跡確認→path明示add→禁則語走査0件→commit→commit後の追跡確認→clean archive build)の
 コマンドと合格条件は`instructions/common/task_flow.md`「Commit gate for OSS-side
@@ -261,7 +303,7 @@ commit後にgateが落ちたら、`git reset --hard`(D004)やamendで巻き戻�
 
 ★cmd本文・task YAMLに「commit・push は F007 により殿承認待ち」の定型を書かない
 (cmd_767・cmd_775はこれをcommitまで待つ意味に読み、承認手続も作られないまま滞留した)。
-書くなら「pushはF007により殿承認待ち(commitは完了SOP step 0で実施)」とする。
+書くなら「公開originへのpush(集約公開)はF007により殿承認待ち(commitは完了SOP step 0で実施)」とする。
 
 #### 未commit滞留の可視化(案3)
 
@@ -553,6 +595,34 @@ cmd_728の設計思想(「通知は鈴であって指図ではない」)をそ�
 返答を、将軍がallow/deny --by lordとして転記する)。詳細は
 `instructions/common/protocol.md`「権限要求ルーティング(cmd_775)」節を
 見よ。
+
+## 権限要求の孤児記録の整理 (cmd_799 ⑤)
+
+孤児記録(`hook_result`が無く、`received_at`から約1810秒を超過した
+`queue/state/permission_requests/*.yaml`)の定義・性質は
+`instructions/common/protocol.md`「孤児記録(結果の無い記録)の扱い
+(cmd_799 ⑤)」節を見よ。孤児は打鍵を止めないが、「未決に見える記録」として
+残る。整理は家老の定型作業であり判断を要さない(上記2アクションと同じく
+交通整理):
+
+- **誰が**: 家老。足軽・軍師・将軍は退避しない。
+- **いつ**: (a) `permission_request`型のinbox通知を処理し終えた直後に1回。
+  (b) 権限要求が長く無い期間は、cmd完了時のdashboard整理の際に1回。
+  どちらも下記`list`を見て、孤児が1本以上あれば退避する。
+- **どう**: 削除せず退避する(`rm`系は使わない)。
+  1. `bash scripts/permission_orphans.sh list` — 計数と孤児の一覧
+     (読み取りのみ。`pending`は待機中でありうる記録なので触れない)。
+  2. `bash scripts/permission_orphans.sh archive` — 予行(何も動かさない)。
+  3. `bash scripts/permission_orphans.sh archive --apply` — 孤児だけを
+     `queue/state/permission_requests_orphaned/`へ同名で`mv`する
+     (退避先に同名があれば上書きせず非0で終わる)。
+  決定ファイル(`queue/state/permission_decisions/`)・resolved・pendingの
+  記録には触れない。
+- **私的git**: 記録は私的git(`~/.shogun-private.git`)の追跡下にある。退避後の
+  旧path削除と新path追加は、既存の私的記録の手順どおりpathを明示して行う
+  (`git add -A`は使わない)。
+- 退避が失敗した(非0)・退避先に同名があった場合は、再実行や強制上書きを
+  せず、dashboardの🚨要対応へ事実(件名・理由)を掲げる。
 
 ## OSS Pull Request Review
 

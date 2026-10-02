@@ -799,6 +799,16 @@ suggestions`キーも出現が不安定と実測されたため一切依存せ�
 記帳する`sent_at`/`channel`/`by`)が、それぞれ発生時点で原子的に追記
 されうる。いずれも作成時点の初期内容には含まれない。
 
+`hook_result.outcome`は`allow`・`deny`・`defer_timeout`・`failed`・
+`aborted`のいずれか。`aborted`(cmd_799 ④)は、手動のNo/Escでモーダルが
+閉じられhookが終了させられた(SIGTERM系)場合に、hookのEXIT trapが
+記帳する。この退出は`finish()`を通らないため、従来は`hook_result`が
+書かれずguardがfail-safe timeout(約30分)まで解けなかった。記帳は
+check-and-setで、記録に`hook_result`が既にあれば何も書かない(通常の
+退出経路と二重に書かない)。SIGKILLはtrapできず、この場合は従来どおり
+fail-safe timeoutが解除する。判定(allow/deny)の中身とtimeout値は変えて
+いない。
+
 ### inbox通知
 
 type: `permission_request`。本文はrequest_idと1行要約のみ(判断材料は
@@ -877,6 +887,19 @@ hookが決定待ちの間、確認モーダルが画面に出たままになる(
 異常終了し決定を読めないまま終わる場合があるため)。実装は
 `scripts/inbox_watcher.sh`へ行った(cmd_775 Phase D redo2で
 `hook_result`記帳判定へ改修)。
+
+### 孤児記録(結果の無い記録)の扱い (cmd_799 ⑤)
+
+孤児記録とは、`hook_result`が無く、`received_at`からtimeout+マージン
+(約1810秒)を超過した記録である(上記guardの「解決済み」「fail-safe超過」
+の定義と同一)。hookは自身のdeadline(timeout−マージン)で退出するため、
+この時点でhookは生きていない(SIGKILL・クラッシュ・再起動、または
+`hook_result`導入前の旧版の記録)。★guardは超過した記録を既に無視する
+ので、孤児は打鍵を止めない——「結果の無い記録」が残って未決に見える
+だけの整理対象である。決定ファイル(`queue/state/permission_decisions/`)
+は監査ログなので整理の対象外。整理は**削除せず退避**とし、手順と道具
+(`scripts/permission_orphans.sh`)は`instructions/roles/karo_role.md`
+「権限要求の孤児記録の整理 (cmd_799 ⑤)」節を正本とする。
 
 ### 試験要件(将軍裁定(d)・Phase C実装で満たすこと)
 

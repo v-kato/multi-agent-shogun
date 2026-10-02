@@ -25,7 +25,8 @@
 #   __SESSION_START_HOOK_AGENT_ID — override for testing (default: from tmux)
 #   __SESSION_START_HOOK_LOG_DIR  — override log dir for testing (default: <repo>/logs)
 #
-# Note: Codex CLI 環境 (ashigaru5・ashigaru6 等) は
+# Note: Codex CLI で動く agent (どの agent が Codex かは config/settings.yaml の
+# cli.agents が決める。陣容は変わるため本註には特定の号との対応を書かない) は
 # scripts/codex_session_start_hook.sh が本スクリプトを明示的に "codex" 引数
 # 付きで呼び出す (JSON 封筒への変換も codex_session_start_hook.sh 側が担う)。
 # 本スクリプト単体を .claude/settings.json から無引数で呼ぶ既存経路は

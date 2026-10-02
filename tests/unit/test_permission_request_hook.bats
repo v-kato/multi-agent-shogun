@@ -41,6 +41,22 @@
 #   T-PRH-030: 旧`defer`決定値はhook_result outcome=failedになる
 #              (defer廃止後の後方互換確認)
 #   T-PRH-031: hook_result追記は既存フィールドを一切変更しない
+#
+# 以下はcmd_799 ④(手動No/Esc中断時の結果記帳)で追加:
+#   T-PRH-032: SIGTERM中断で hook_result outcome=aborted が1回だけ書かれる
+#   T-PRH-033: SIGHUP中断でも同様
+#   T-PRH-034: defer_timeout経路でEXIT trapが二重記帳・abortedへの上書きをしない
+#   T-PRH-035: allow/deny経路で hook_result が1本のまま(outcome不変)
+#   T-PRH-036: abortedの後、watcher guardがfail-safe timeoutを待たず解除される
+#
+# 以下はcmd_799 ④ 堅牢化(QC REDO: 隔離実機で約23%記録されなかった)で追加。
+# Claude Codeは中断時にSIGTERM→約1.4秒後にSIGKILLを送る。その猶予内に記帳が
+# 終わること(=trap内の記帳がbash組込みだけで速いこと・待機が中断可能なこと)を
+# 「TERMの約0.3秒後にSIGKILL」で決定的に固定する:
+#   T-PRH-037: 記帳pythonが遅くても(stub)TERMの0.3秒後のSIGKILLまでにabortedが残る
+#   T-PRH-038: 待機間隔が長くても(bashだけにTERM)中断可能な待ちで0.3秒以内に記帳される
+#   T-PRH-039: 既に記帳済みのhook_resultはtrapが上書き・二重記帳しない
+#   T-PRH-040: 記録ファイルが無ければtrapは記録を新規作成しない
 
 SCRIPT_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 HOOK_SCRIPT="$SCRIPT_DIR/scripts/permission_request_hook.sh"
@@ -956,4 +972,353 @@ print('OK')
 "
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
+}
+
+# ─── cmd_799 ④: 手動No/Escによる中断(SIGTERM系)でも hook_result を1回だけ記帳する ───
+#
+# 実測(context/cmd_775_manual_answer_test.md Case B/B2): 手動No/Escでは
+# Claude Codeがhookプロセスを終了させ、finish()を通らないまま退出するため
+# hook_resultが書かれず、watcherのguardがfail-safe timeout(約30分)まで
+# 解けなかった。EXIT trapから outcome=aborted を記帳する(check-and-setで
+# 通常退出経路との二重記帳を防ぐ)。判定(allow/deny)の中身・timeout値は
+# 変えない。
+#
+# ★D006-E1 Branch 1: hookは本試験が直接spawnした子であり、`$!`をspawn直後に
+#   専用変数 HOOK_PID へ捕捉して以後再代入しない。signal送信直前に
+#   (1) kill -0(signal 0=存在確認のみ)と (2) `jobs -r -p`(この shellが
+#   未回収のままの同じ子であること=pid再利用でないこと)を確かめ、確認
+#   できなければsignalを送らない。単一の正のPIDのみを対象とし、broadcast・
+#   pgid指定・pgrep等の列挙は一切使わない。
+
+HOOK_PID=""
+
+# hookを直接の子としてバックグラウンド起動する。決定ファイルは置かないので
+# ポーリング中(timeout 60s・deadline 60s)のまま待機し続ける。
+spawn_hook_bg() {
+    local json="$1"
+    local poll_interval="${2:-0.2}"
+    __PERMISSION_HOOK_ROOT="$TEST_TMP" \
+    __PERMISSION_HOOK_AGENT_ID="ashigaru9" \
+    __PERMISSION_HOOK_POLL_INTERVAL_SECONDS="$poll_interval" \
+    PERMISSION_HOOK_TIMEOUT_SECONDS="60" \
+    __PERMISSION_HOOK_MARGIN_SECONDS="0" \
+    bash "$HOOK_SCRIPT" <<< "$json" >"$TEST_TMP/hook_bg.out" 2>"$TEST_TMP/hook_bg.err" &
+    HOOK_PID=$!
+}
+
+# 記録ファイルが作られ、かつhookが記録のpathを確定して家老inbox通知(手順6=
+# ポーリングの直前)へ進むまで、最大約30秒待つ。記録ファイルが現れた直後には、
+# hookがまだ記録pathを確定していない(=abortedを記帳できない)僅かな窓があり、
+# 高負荷だとそこでsignalを送ってしまう。モックinbox_writeの呼出しログは、その窓の
+# 後でしか書かれないので、ログの出現を「hookが退出時記帳の準備を終えた」合図にする。
+wait_for_request_file() {
+    local i
+    for i in $(seq 1 300); do
+        [ -n "$(request_files)" ] && [ -s "$TEST_TMP/inbox_write_calls.log" ] && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+# 指定signalを HOOK_PID へ送る。D006-E1 Branch 1の同一性確認(上記)を満たした
+# 時だけ送り、確認できなければ(既に終了・回収済み等)送らず非0を返す。
+send_signal_hook_bg() {
+    local sig="$1"
+    if kill -0 "$HOOK_PID" 2>/dev/null && [[ " $(jobs -r -p | tr '\n' ' ') " == *" $HOOK_PID "* ]]; then
+        kill -s "$sig" "$HOOK_PID" 2>/dev/null || true
+        return 0
+    fi
+    return 1
+}
+
+# 指定signalを HOOK_PID へ送り、hookの終了を待つ。結果は HOOK_RC に入る。
+signal_hook_bg_and_wait() {
+    send_signal_hook_bg "$1" || return 1
+    HOOK_RC=0
+    wait "$HOOK_PID" 2>/dev/null || HOOK_RC=$?
+    return 0
+}
+
+# Claude Codeの中断を模す: TERMを送り、約0.3秒後にまだ生きていればKILL(trap不能)を
+# 送ってから終了を待つ。本物は約1.4秒後にKILLを送るので、その猶予より短く厳しい。
+# KILLの送信にもD006-E1 Branch 1の同一性確認が掛かる(既に終了していれば送らない)。
+term_then_kill_hook_bg_and_wait() {
+    send_signal_hook_bg TERM || return 1
+    sleep 0.3
+    send_signal_hook_bg KILL || true
+    HOOK_RC=0
+    wait "$HOOK_PID" 2>/dev/null || HOOK_RC=$?
+    return 0
+}
+
+# 記録ファイル内のトップレベル `hook_result:` キーの本数を数える
+# (二重記帳検出用。YAMLのキー重複はsafe_loadでは後勝ちで隠れるため生行で数える)。
+hook_result_key_count() {
+    /usr/bin/grep -c '^hook_result:' "$1" || true
+}
+
+@test "T-PRH-032: SIGTERM while polling (manual No/Esc) records hook_result outcome=aborted exactly once" {
+    local json
+    json="$(default_json 'echo aborted_sigterm')"
+    spawn_hook_bg "$json"
+    wait_for_request_file
+
+    local f
+    f="$(request_files)"
+    [ -n "$f" ]
+    # 中断前: 未決(hook_resultなし)であること
+    [ "$(hook_result_key_count "$f")" -eq 0 ]
+
+    signal_hook_bg_and_wait TERM
+    # signalで終了した(正常終了0ではない)・stdoutへ何も出していない(allow/denyを出さない)
+    [ "$HOOK_RC" -ne 0 ]
+    [ ! -s "$TEST_TMP/hook_bg.out" ]
+
+    [ "$(hook_result_key_count "$f")" -eq 1 ]
+    run "$PYTHON" -c "
+import yaml
+with open('$f') as fh:
+    d = yaml.safe_load(fh)
+assert d['hook_result']['outcome'] == 'aborted', d
+assert isinstance(d['hook_result']['returned_at'], str) and d['hook_result']['returned_at'], d
+# 既存フィールドは不変(追加のみ)
+assert d['agent_id'] == 'ashigaru9', d
+assert d['tool_input']['command'] == 'echo aborted_sigterm', d
+print('OK')
+"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "T-PRH-033: SIGHUP while polling also records hook_result outcome=aborted exactly once" {
+    local json
+    json="$(default_json 'echo aborted_sighup')"
+    spawn_hook_bg "$json"
+    wait_for_request_file
+
+    local f
+    f="$(request_files)"
+    [ -n "$f" ]
+
+    signal_hook_bg_and_wait HUP
+    [ "$HOOK_RC" -ne 0 ]
+    [ ! -s "$TEST_TMP/hook_bg.out" ]
+
+    [ "$(hook_result_key_count "$f")" -eq 1 ]
+    run /usr/bin/grep -A3 '^hook_result:' "$f"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"outcome: aborted"* ]]
+}
+
+@test "T-PRH-034: normal exit paths still write exactly one hook_result and never aborted (no double write via the EXIT trap)" {
+    local json f
+
+    # defer_timeout 経路(deadline到達・決定なし)
+    json="$(default_json 'echo once_timeout')"
+    __PERMISSION_HOOK_ROOT="$TEST_TMP" \
+    __PERMISSION_HOOK_AGENT_ID="ashigaru9" \
+    __PERMISSION_HOOK_POLL_INTERVAL_SECONDS="0.2" \
+    PERMISSION_HOOK_TIMEOUT_SECONDS="1" \
+    __PERMISSION_HOOK_MARGIN_SECONDS="0" \
+    run bash "$HOOK_SCRIPT" <<< "$json"
+    [ "$status" -ne 0 ]
+    f="$(request_files)"
+    [ -n "$f" ]
+    [ "$(hook_result_key_count "$f")" -eq 1 ]
+    run /usr/bin/grep -A3 '^hook_result:' "$f"
+    [[ "$output" == *"outcome: defer_timeout"* ]]
+    [[ "$output" != *"aborted"* ]]
+}
+
+@test "T-PRH-035: allow and deny exit paths each write exactly one hook_result (outcome unchanged by the EXIT trap)" {
+    local outcome decision json f request_id
+    for decision in allow deny; do
+        json="$(default_json "echo once_${decision}")"
+        __PERMISSION_HOOK_ROOT="$TEST_TMP" \
+        __PERMISSION_HOOK_AGENT_ID="ashigaru9" \
+        __PERMISSION_HOOK_UTC_TS_OVERRIDE="20260917T13000${#decision}Z" \
+        __PERMISSION_HOOK_POLL_INTERVAL_SECONDS="0.2" \
+        PERMISSION_HOOK_TIMEOUT_SECONDS="1" \
+        __PERMISSION_HOOK_MARGIN_SECONDS="0" \
+        run bash "$HOOK_SCRIPT" <<< "$json"
+        f="$(find "$TEST_TMP/queue/state/permission_requests" -maxdepth 1 -name '*_20260917T13000'"${#decision}"'Z_*.yaml' -type f)"
+        [ -n "$f" ]
+        request_id="$(basename "$f" .yaml)"
+
+        if [ "$decision" = "deny" ]; then
+            printf 'request_id: %s\ndecision: deny\nreason: "test deny"\nby: shogun\ndecided_at: "2026-09-17T13:00:00Z"\n' \
+                "$request_id" > "$TEST_TMP/queue/state/permission_decisions/${request_id}.yaml"
+        else
+            printf 'request_id: %s\ndecision: allow\nby: lord\nreason: "test allow"\ndecided_at: "2026-09-17T13:00:00Z"\n' \
+                "$request_id" > "$TEST_TMP/queue/state/permission_decisions/${request_id}.yaml"
+        fi
+
+        __PERMISSION_HOOK_ROOT="$TEST_TMP" \
+        __PERMISSION_HOOK_AGENT_ID="ashigaru9" \
+        __PERMISSION_HOOK_UTC_TS_OVERRIDE="20260917T13000${#decision}Z" \
+        __PERMISSION_HOOK_POLL_INTERVAL_SECONDS="0.2" \
+        PERMISSION_HOOK_TIMEOUT_SECONDS="30" \
+        __PERMISSION_HOOK_MARGIN_SECONDS="25" \
+        run bash "$HOOK_SCRIPT" <<< "$json"
+        [ "$status" -eq 0 ]
+        [[ "$output" == *'"behavior": "'"$decision"'"'* ]]
+
+        [ "$(hook_result_key_count "$f")" -eq 1 ]
+        outcome="$(/usr/bin/grep -A3 '^hook_result:' "$f" | /usr/bin/grep 'outcome:' | awk '{print $2}')"
+        [ "$outcome" = "$decision" ]
+    done
+}
+
+@test "T-PRH-036: after an aborted exit the watcher guard is released immediately (no wait for the fail-safe timeout); while the hook is still polling it is held" {
+    local json
+    json="$(default_json 'echo aborted_guard')"
+    spawn_hook_bg "$json"
+    wait_for_request_file
+
+    local f
+    f="$(request_files)"
+    [ -n "$f" ]
+
+    # 中断前: hook待機中(記録の received_at は直近=fail-safe未到達)ゆえ未決→guard有効
+    run env AGENT_ID=ashigaru9 SCRIPT_DIR="$TEST_TMP" __INBOX_WATCHER_TESTING__=1 \
+        bash -c "source '$SCRIPT_DIR/scripts/inbox_watcher.sh'; has_pending_permission_request && echo PENDING || echo RESOLVED"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PENDING"* ]]
+
+    signal_hook_bg_and_wait TERM
+
+    # 中断後: hook_result(aborted)により、received_atが直近のままでも解除される
+    run env AGENT_ID=ashigaru9 SCRIPT_DIR="$TEST_TMP" __INBOX_WATCHER_TESTING__=1 \
+        bash -c "source '$SCRIPT_DIR/scripts/inbox_watcher.sh'; has_pending_permission_request && echo PENDING || echo RESOLVED"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"RESOLVED"* ]]
+}
+
+# ─── cmd_799 ④ 堅牢化: SIGTERM後の約1.4秒の猶予(その後SIGKILL)に記帳を収める ───
+#
+# 実機の独立再現(context/cmd_799_hook_qc.md §1)では、EXIT trapに頼る作りだと
+# 約23%の中断で記録が残らなかった(trapに入る前・記帳(python起動)の途中での
+# SIGKILL)。以下は、その猶予に収まる作りであること(trap内の記帳がbash組込み
+# だけ・待機が中断可能)を、TERMの約0.3秒後にKILLを送って決定的に固定する。
+
+# 記録ファイル内のトップレベルキーの並びと、hook_result以外の値を取り出す。
+record_snapshot() {
+    "$PYTHON" -c "
+import json, sys, yaml
+with open(sys.argv[1]) as fh:
+    d = yaml.safe_load(fh)
+print(json.dumps({k: v for k, v in d.items() if k != 'hook_result'}, sort_keys=True, default=str))
+print(json.dumps(list(d.keys())))
+" "$1"
+}
+
+@test "T-PRH-037: aborted is recorded before a SIGKILL 0.3s after SIGTERM even when python is slow (the EXIT trap uses no python)" {
+    # 記録作成後のpython起動を5秒遅くするstub(flagファイルができるまでは素通し)。
+    # trap内の記帳がpythonに依存していれば、0.3秒後のKILLまでに間に合わない。
+    rm -f "$TEST_TMP/.venv"
+    mkdir -p "$TEST_TMP/.venv/bin"
+    cat > "$TEST_TMP/.venv/bin/python3" <<STUB
+#!/bin/bash
+[ -e "$TEST_TMP/slow_python" ] && sleep 5
+exec "$PYTHON" "\$@"
+STUB
+    chmod +x "$TEST_TMP/.venv/bin/python3"
+
+    local json f
+    json="$(default_json 'echo aborted_slow_python')"
+    spawn_hook_bg "$json"
+    wait_for_request_file
+    f="$(request_files)"
+    [ -n "$f" ]
+    local before
+    before="$(record_snapshot "$f")"
+    : > "$TEST_TMP/slow_python"
+
+    term_then_kill_hook_bg_and_wait
+    [ ! -s "$TEST_TMP/hook_bg.out" ]
+
+    [ "$(hook_result_key_count "$f")" -eq 1 ]
+    # 形式はpython記帳と同じ: outcome=aborted・returned_atは文字列(UTC)・既存フィールド不変
+    run "$PYTHON" -c "
+import re, yaml
+with open('$f') as fh:
+    d = yaml.safe_load(fh)
+r = d['hook_result']
+assert r['outcome'] == 'aborted', d
+assert isinstance(r['returned_at'], str), d
+assert re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', r['returned_at']), d
+assert sorted(r.keys()) == ['outcome', 'returned_at'], d
+print('OK')
+"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+    # 追記のみ: hook_result以外の既存フィールドは不変・hook_resultは末尾に追加される
+    local after
+    after="$(record_snapshot "$f")"
+    [ "$(printf '%s\n' "$after" | head -1)" = "$(printf '%s\n' "$before" | head -1)" ]
+    [ "$(printf '%s\n' "$after" | tail -1 | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)[-1])')" = "hook_result" ]
+}
+
+@test "T-PRH-038: with a long poll interval and SIGTERM sent only to the hook, aborted is still recorded before a SIGKILL 0.3s later (interruptible wait)" {
+    # 待機間隔30秒。前景のsleepだと、bashだけに来たTERMはsleepが終わるまで処理
+    # されず(trapが遅れ)、0.3秒後のKILLまでに記帳できない。孫のsleepには
+    # signalを送らない(D006-E1: 直接の子のみ)ので、この状況を正確に再現する。
+    local json f
+    json="$(default_json 'echo aborted_long_poll')"
+    spawn_hook_bg "$json" 30
+    wait_for_request_file
+    f="$(request_files)"
+    [ -n "$f" ]
+    [ "$(hook_result_key_count "$f")" -eq 0 ]
+
+    term_then_kill_hook_bg_and_wait
+    [ ! -s "$TEST_TMP/hook_bg.out" ]
+
+    [ "$(hook_result_key_count "$f")" -eq 1 ]
+    run /usr/bin/grep -A3 '^hook_result:' "$f"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"outcome: aborted"* ]]
+}
+
+@test "T-PRH-039: the EXIT trap never overwrites or duplicates an already-recorded hook_result" {
+    local json f
+    json="$(default_json 'echo aborted_already_recorded')"
+    spawn_hook_bg "$json"
+    wait_for_request_file
+    f="$(request_files)"
+    [ -n "$f" ]
+
+    # 先に別の結果が記帳済みの記録(例: 通常経路が書き終えた直後にTERMが来た場合)
+    printf "hook_result:\n  outcome: failed\n  returned_at: '2026-10-02T00:00:00Z'\n" >> "$f"
+    local before
+    before="$(cat "$f")"
+
+    signal_hook_bg_and_wait TERM
+    [ "$HOOK_RC" -ne 0 ]
+
+    [ "$(hook_result_key_count "$f")" -eq 1 ]
+    [ "$(cat "$f")" = "$before" ]
+    run /usr/bin/grep -A3 '^hook_result:' "$f"
+    [[ "$output" == *"outcome: failed"* ]]
+    [[ "$output" != *"aborted"* ]]
+}
+
+@test "T-PRH-040: the EXIT trap does not create a record file that does not exist" {
+    local json f
+    json="$(default_json 'echo aborted_no_record')"
+    spawn_hook_bg "$json"
+    wait_for_request_file
+    f="$(request_files)"
+    [ -n "$f" ]
+
+    # 記録ファイルを退避して「無い」状態にする(削除はしない)
+    mv "$f" "$TEST_TMP/moved_away_record.yaml"
+    [ ! -e "$f" ]
+
+    signal_hook_bg_and_wait TERM
+    [ "$HOOK_RC" -ne 0 ]
+
+    # trapの`>>`が空の記録を新規作成していない(hook_resultだけのファイルが残らない)
+    [ ! -e "$f" ]
+    [ -z "$(request_files)" ]
 }

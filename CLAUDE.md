@@ -731,8 +731,8 @@ directory itself qualifies for D002-E1.
 
 1. **grepの盲点**: シェル関数版`grep`(ugrep経由)は`tmp/`・`skills/`等gitignore対象を素通りする(cmd_735実測: 同一検索で関数版26ファイル/実体413ファイル)。網羅性が必要な検索・棚卸しは`/usr/bin/grep`をフルパスで呼べ。計数は`scripts/count_by_dir.sh`を使い、必ずディレクトリ別内訳で報告せよ(総数のみ禁止)。二人以上の数が食い違ったら「両方が違う部分を見ている」を先に疑え。
 2. **skills/配下の差分はprivategitでしか見えない**: 通常gitでは`git diff`/`codd impact`が空振りする。「差分0=影響なし」と即断するな。`GIT_DIR=$HOME/.shogun-private.git GIT_WORK_TREE=/home/kato/shogun git diff` で確認せよ。
-3. **CRLF/LF混在ファイル**: Editツールの部分置換も対象外の既存行をファイル全体の支配的EOLへ巻き込んで正規化することがある(実例2件)。混在ファイルではPythonの`newline=''`等、行末を変換しないbyte保持経路を優先せよ。編集後は`git diff --numstat`と`--ignore-space-at-eol --numstat`を突き合わせ、改行由来の水増しが無いことを確認せよ。
-4. **使い捨てディレクトリ**: 作成時点で`mktemp -d`を既定とせよ。後で安全に削除できるのは`mktemp -d`で作った場合のみ(D002-E1参照)。
+3. **CRLF/LF混在ファイル**: Editツールの部分置換も対象外の既存行をファイル全体の支配的EOLへ巻き込んで正規化することがある(実例2件)。混在ファイルではPythonの`newline=''`等、行末を変換しないbyte保持経路を優先せよ。編集後は`git diff --numstat`と`--ignore-space-at-eol --numstat`を突き合わせ、改行由来の水増しが無いことを確認せよ。判定は`python3 scripts/crlf_diff_check.py --rev <編集前のrev> <file>`で1命令(読取専用・行末だけ変わった行やnumstat不一致があれば非0・詳細: tooling_pitfalls.md ③)。
+4. **使い捨てディレクトリ**: 作成時点で`mktemp -d`を既定とせよ。後で安全に削除できるのは`mktemp -d`で作った場合のみ(D002-E1参照)。Batsは`bash scripts/bats_tmpdir_guard.sh <batsの引数>`経由で起動せよ(相対TMPDIRならbatsを起動せず非0で止まる・詳細: tooling_pitfalls.md ④)。
 5. **使い捨て検証に後始末を書くな**: タスク中に手で叩く検証・確認コマンドに、後始末の`rm -rf`を書かない。`/tmp`の使い捨ては再起動で片付く。書かなければパーミッション確認が出ず、殿の手を煩わせない。規則の回避ではなく、不要な操作をしないだけである。★ただしテストのteardown・常設スクリプトは別——繰り返し走るものには後始末が要る。
 6. **出自は後から再構成できない**: 一時ディレクトリを消す予定があるなら、`mktemp -d`の時点で変数へ捕まえよ。後から`ls`やglobで取り直した値はD002-E1(b)を満たさず、そのディレクトリは二度と消せなくなる。
 7. **D007下のマウント確認**: `mount`/`umount`はread-onlyでも実行禁止(D007・例外なし)。マウント状況は`cat /proc/mounts`/`findmnt`で読め(禁止対象に含まれない)。詳細: tooling_pitfalls.md ⑤

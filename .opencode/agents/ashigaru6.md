@@ -1023,6 +1023,16 @@ suggestions`キーも出現が不安定と実測されたため一切依存せ�
 記帳する`sent_at`/`channel`/`by`)が、それぞれ発生時点で原子的に追記
 されうる。いずれも作成時点の初期内容には含まれない。
 
+`hook_result.outcome`は`allow`・`deny`・`defer_timeout`・`failed`・
+`aborted`のいずれか。`aborted`(cmd_799 ④)は、手動のNo/Escでモーダルが
+閉じられhookが終了させられた(SIGTERM系)場合に、hookのEXIT trapが
+記帳する。この退出は`finish()`を通らないため、従来は`hook_result`が
+書かれずguardがfail-safe timeout(約30分)まで解けなかった。記帳は
+check-and-setで、記録に`hook_result`が既にあれば何も書かない(通常の
+退出経路と二重に書かない)。SIGKILLはtrapできず、この場合は従来どおり
+fail-safe timeoutが解除する。判定(allow/deny)の中身とtimeout値は変えて
+いない。
+
 ### inbox通知
 
 type: `permission_request`。本文はrequest_idと1行要約のみ(判断材料は
@@ -1101,6 +1111,19 @@ hookが決定待ちの間、確認モーダルが画面に出たままになる(
 異常終了し決定を読めないまま終わる場合があるため)。実装は
 `scripts/inbox_watcher.sh`へ行った(cmd_775 Phase D redo2で
 `hook_result`記帳判定へ改修)。
+
+### 孤児記録(結果の無い記録)の扱い (cmd_799 ⑤)
+
+孤児記録とは、`hook_result`が無く、`received_at`からtimeout+マージン
+(約1810秒)を超過した記録である(上記guardの「解決済み」「fail-safe超過」
+の定義と同一)。hookは自身のdeadline(timeout−マージン)で退出するため、
+この時点でhookは生きていない(SIGKILL・クラッシュ・再起動、または
+`hook_result`導入前の旧版の記録)。★guardは超過した記録を既に無視する
+ので、孤児は打鍵を止めない——「結果の無い記録」が残って未決に見える
+だけの整理対象である。決定ファイル(`queue/state/permission_decisions/`)
+は監査ログなので整理の対象外。整理は**削除せず退避**とし、手順と道具
+(`scripts/permission_orphans.sh`)は`instructions/roles/karo_role.md`
+「権限要求の孤児記録の整理 (cmd_799 ⑤)」節を正本とする。
 
 ### 試験要件(将軍裁定(d)・Phase C実装で満たすこと)
 
@@ -1247,9 +1270,12 @@ Karo's. Karo's part ends at updating the entry's `status` to `done`/
 `cancelled` via `shogun_to_karo_lock.sh update`. Before that update
 (after Gunshi QC PASS) comes step 0, the OSS-side develop commit
 (cmd_788 — "Commit gate for OSS-side deliverables" below); after it
-come Karo's usual completion steps (dashboard ✅戦果 → privategit
-commit/push → ntfy) — see `instructions/roles/karo_role.md`
-"Archive on Completion" for Karo's exact steps.
+come Karo's usual completion steps (dashboard ✅戦果 → privategit add
+→ dual-tracking check `oss_dual_track_check.sh --index` (after the add,
+before the commit; commit only on rc=0) → privategit commit/push →
+③b raw-history backup `oss_raw_backup.sh` → ntfy; cmd_798) — see
+`instructions/roles/karo_role.md` "Archive on Completion" for Karo's
+exact steps.
 
 | Status | In active file? | Action | Actor |
 |--------|----------------|--------|-------|
@@ -1506,8 +1532,14 @@ date "+%Y-%m-%dT%H:%M:%S"    # For YAML (ISO 8601)
 Rule:
 - Run the same checks as GitHub Actions *before* committing.
 - Only commit when checks are OK.
-- Ask the Lord before any `git push`. ★push only: a local commit to
-  `develop` is part of the completion SOP and needs no approval (F007).
+- Ask the Lord before any `git push` (F007). For this repository, every
+  push to the public origin (or upstream) and every branch deletion there
+  needs its own approval. Publishing to the public origin goes through the
+  aggregate publish (`oss_publish.sh`) only; `develop` is a local trunk and
+  is never pushed (cmd_798).
+- ★No approval needed: a local commit to `develop` (completion SOP
+  step 0), `privategit push`, and the push to the private repo by
+  `oss_raw_backup.sh` (completion SOP ③b) (F007).
 
 Minimum local checks:
 ```bash
@@ -1623,12 +1655,22 @@ git diff --exit-code instructions/generated/ .opencode/agents/
 | F004 | Polling/wait loops | Event-driven (inbox) | Wastes API credits |
 | F005 | Skip context reading | Always read first | Prevents errors |
 | F006 | Edit generated files directly (`instructions/generated/*.md`, `AGENTS.md`, `.github/copilot-instructions.md`, `agents/default/system.md`) | Edit source templates (`CLAUDE.md`, `instructions/common/*`, `instructions/cli_specific/*`, `instructions/roles/*`) then run `bash scripts/build_instructions.sh` | CI "Build Instructions Check" fails when generated files drift from templates |
-| F007 | `git push` (sending to a remote) without the Lord's explicit approval. ★Only `git push` — local commits to `develop` are NOT covered (they are part of the completion SOP and need no approval) | Ask the Lord first (push only) | Prevents leaking secrets / unreviewed changes |
+| F007 | `git push` (sending to a remote, including deleting a remote branch) without the Lord's explicit approval. For this repository, each push to the public origin (and upstream) and each branch deletion there needs its own approval. ★Only `git push` — local commits to `develop` are NOT covered (they are part of the completion SOP and need no approval). Also NOT covered: `privategit push` and the push to the private repo by `oss_raw_backup.sh` (completion SOP) | Ask the Lord first (push only; for the public origin, one approval per push) | Prevents leaking secrets / unreviewed changes / the raw development history |
 
 ★F007の範囲(cmd_788): 殿承認を要するのは`git push`(remoteへの送信)のみ。developへのlocal commitは
 完了SOPの一部(`instructions/roles/karo_role.md`「OSS側成果物のdevelop commit」)であり承認不要。
 cmd_767・cmd_775は「commit・push は F007 により殿承認待ち」と読み、commitまで止めて80件超が
 作業木に滞留した(cmd_786で回収)ため、書き分けた。
+
+★F007の書き分け(cmd_798):
+- **1回ごとに殿承認**: 公開origin(とupstream)へのpushと、そこでのbranchの削除。承認は具体的に
+  (例: 「この集約commit〈sha〉を載せる」「このbranchを1回削除する」)。公開originへ載せるのは
+  集約公開(`oss_publish.sh`)だけである。
+- **承認不要(F007の対象外)**: developへのlocal commit・privategitのpush・`oss_raw_backup.sh`による
+  privateへの退避のpush(いずれも完了SOPの一部)。
+- **公開originへ送らない**: `develop`・`local-archive/*`(生の履歴)。originにdevelopは無い。
+  pre-push hook・`push.default=nothing`が機械的にも止めるが、止まることを当てにして試さない。
+- 上記以外のremoteへのpushは、従来どおり`git push`として殿承認を要する。
 
 ## Shogun Forbidden Actions
 
@@ -2188,6 +2230,14 @@ privategitの日常運用ルール(commit/push手順)は
   EOLへ戻すことで、意図した1行追加だけを残した。★この事例は
   「自己確認手順が実際に効いた」実例でもある——手順を踏んだ結果
   として乖離を検知でき、範囲を特定して復元できた。
+- 判定の道具(cmd_800): `python3 scripts/crlf_diff_check.py --rev <編集前の
+  rev> <file>...`(`--rev` 省略時は HEAD)。読み取り専用で、判定するだけで
+  直さない。上の numstat の突き合わせに加え、内容が変わっていない行が参照版
+  (checkout 変換後の内容)と行末まで byte 一致することを確かめ、CRLF/LF の
+  行数・LF のみの行の行番号・最初の差分位置を出す。終了コードは 0=健全 /
+  1=行末だけ変わった行がある・numstat が一致しない / 2=対象 0 本・rev 未解決・
+  参照版にファイルが無い等(沈黙して 0 を返さない)。`.gitattributes` の eol
+  変換などで git の numstat が行末の差を見ない場合も、byte 比較で捕まえる。
 
 ## ④ 使い捨てディレクトリは mktemp -d を既定とする
 
@@ -2203,6 +2253,14 @@ cmd_732のprobe2自己申告違反の原因は、CLAUDE.mdの条文の不備で�
 - 本節は足軽向けの実行ルールである。`instructions/` は足軽の常時
   読込経路ではないため、CLAUDE.md本体側の簡潔な1節が一次情報である。
   本ファイルは詳細・経緯の補足に位置づける。
+- Bats は `bash scripts/bats_tmpdir_guard.sh <bats の引数>` 経由で起動する
+  (cmd_800)。TMPDIR が未設定か `/` で始まる時だけ bats を起動し、引数は
+  そのまま渡す。相対の TMPDIR(空文字を含む)なら bats を起動せず、理由を
+  出して終了コード 2 で止まる。template 無しの `mktemp -d` は TMPDIR の下に
+  作るため、相対の TMPDIR では相対パスを返し、teardown の `rm -rf` が
+  D002-E1(d) の外へ落ちる。試験のコード側で TMPDIR に依らず絶対パスに
+  したいときは、`mktemp -d /tmp/<名前>.XXXXXX` のように絶対リテラルの
+  template を与える。
 
 ## ⑤ D007(mount/umount絶対禁止)下でのマウント状況確認手段
 
@@ -2328,6 +2386,35 @@ Claude Code の hook は「cwd follows Claude」で実行される——hook の
   隔離tmux実機・相対失敗/絶対成功の対比)と `tests/unit/
   test_permission_request_hook_settings.bats` の T-PRHS-003(静的・
   settings.json の command 文字列を直接検査)。
+
+## ⑩ 公開originへのpushは `oss_publish.sh` から——引数なし `git push` の手癖(cmd_798)
+
+公開originへ載せる経路は、専用の公開道具(`skills/shogun-oss-publish/
+scripts/oss_publish.sh`)を通すものだけである。mainの集約は `prepare`、
+上流向けPRは `prepare-pr` →それぞれ殿承認→`push`。手書きの
+`git push` で公開originへ送らない。developはローカルの作業幹で、
+originにdevelopは無い(F007・`instructions/common/forbidden_actions.md`)。
+
+- 事故類型1(引数なし `git push`): developがorigin/developを追跡して
+  いた頃、歯止めの無い状態で引数なしの `git push` を打つと、生の
+  develop先端がそのままorigin/developへ載った(cmd_798の偽originで
+  実測・rc=0)。gitは送り先も送るbranchも確かめず、何も言わずに
+  成功する。手癖の一打で生の履歴が公開される。
+- 事故類型2(予行の中の強制push): cmd_797では、偽origin(`mktemp -d`
+  のローカルbare repo)に対する予行のスクリプトが、巻き戻しの段で
+  lease付きの強制pushを使っており、「force系を書かず実行せず」の
+  指示に反して1回実行された(実originには繋がっておらず、本人が
+  申告した)。送り先が偽物でも、force系を書いた道具は走らせない。
+  走らせる前にスクリプトの中身を読んで確かめる。
+- 今は道具が止める: `push.default=nothing`(引数なしpushをgitが拒否)、
+  upstreamのpushurlの無効化、pre-push hook(送り先・名前・内容・
+  ticketの検査)。止める対象は手癖と取り違えであり、意図的に外す操作
+  (`--no-verify`・`core.hooksPath`の書換え等)は止めない。止まる
+  ことを当てにして試さない。
+- 道具は黙る: hookが無いとgitは素通しにする。実行bitが無い場合も、
+  hintを出すだけでpushは止めない。`oss_guard_install.sh --check` を、
+  集約公開の前と完了SOPの③bの前に通す(`oss_publish.sh` は内部で通す)。
+- 詳細(規則R0〜R5・限界・設置と巻き戻し)は同skillの SKILL.md を見よ。
 
 ## 関連
 

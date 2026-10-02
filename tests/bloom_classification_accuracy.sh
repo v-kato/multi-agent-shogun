@@ -108,8 +108,12 @@ for task in tasks:
                      _glob.glob('/usr/local/bin/claude')
         claude_cmd = next((c for c in candidates if os.path.isfile(c)), 'claude')
     try:
+        # headless の子が project の CLAUDE.md・hooks を継承して親 agent を騙らぬよう
+        # --tools '' と --setting-sources '' を必ず両方付ける。--tools は可変長引数ゆえ
+        # prompt は位置引数ではなく stdin で渡す(直後の位置引数が道具名として食われる)。
         result = subprocess.run(
-            [claude_cmd, '-p', f'''このタスクの認知レベル（Bloomの分類法、1-6）を数値1つで答えよ。
+            [claude_cmd, '-p', '--tools', '', '--setting-sources', ''],
+            input=f'''このタスクの認知レベル（Bloomの分類法、1-6）を数値1つで答えよ。
 説明不要、数値のみ返せ。
 
 タスク説明:
@@ -117,7 +121,7 @@ for task in tasks:
 
 レベル定義:
 1=記憶(Remember), 2=理解(Understand), 3=応用(Apply),
-4=分析(Analyze), 5=評価(Evaluate), 6=創造(Create)'''],
+4=分析(Analyze), 5=評価(Evaluate), 6=創造(Create)''',
             capture_output=True, text=True, timeout=60
         )
         response = result.stdout.strip()

@@ -265,6 +265,67 @@ PYEOF
     [[ "$output" == *"Auto-inferred type=claude from model=fable"* ]]
 }
 
+# --- cmd_799 ⑥: codex 自動判定の境界(ドット付きの版) ---
+# 一致すべき名 : gpt-6 系で世代の直後が '-' か '.' のもの(gpt-6-sol / gpt-6.1-sol)。
+# 一致してはならぬ名: gpt-60・gpt-6x 等の別系統名、gpt-5.4-mini(opencode 用の名)、provider 付き。
+# いずれも --human-initiated 無しで走らせるため、型補完(Step 0.5)の後の gate(exit 3)で
+# 止まり、settings.yaml にも pane にも触れない。
+
+@test "switch_cli.sh: --model gpt-6.1-sol(type未指定) → codex型に自動判定される (cmd_799)" {
+    run bash "${PROJECT_ROOT}/scripts/switch_cli.sh" ashigaru1 --model gpt-6.1-sol
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"Auto-inferred type=codex from model=gpt-6.1-sol"* ]]
+}
+
+@test "switch_cli.sh: --model gpt-6.2-luna(type未指定) → codex型に自動判定される (cmd_799)" {
+    run bash "${PROJECT_ROOT}/scripts/switch_cli.sh" ashigaru1 --model gpt-6.2-luna
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"Auto-inferred type=codex from model=gpt-6.2-luna"* ]]
+}
+
+@test "switch_cli.sh: --model gpt-6.10-sol(小数部が2桁)も codex型に自動判定される (cmd_799)" {
+    run bash "${PROJECT_ROOT}/scripts/switch_cli.sh" ashigaru1 --model gpt-6.10-sol
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"Auto-inferred type=codex from model=gpt-6.10-sol"* ]]
+}
+
+@test "switch_cli.sh: --model gpt-6-astra(ハイフン系の未列挙名)も codex型に自動判定される (cmd_799)" {
+    run bash "${PROJECT_ROOT}/scripts/switch_cli.sh" ashigaru1 --model gpt-6-astra
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"Auto-inferred type=codex from model=gpt-6-astra"* ]]
+}
+
+@test "switch_cli.sh: --model gpt-5.6-sol(既存のドット付き判定)は従来どおり codex型 (cmd_799回帰)" {
+    run bash "${PROJECT_ROOT}/scripts/switch_cli.sh" ashigaru1 --model gpt-5.6-sol
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"Auto-inferred type=codex from model=gpt-5.6-sol"* ]]
+}
+
+@test "switch_cli.sh: --model gpt-60-sol(別系統名)は codex型に判定されない (cmd_799境界)" {
+    run bash "${PROJECT_ROOT}/scripts/switch_cli.sh" ashigaru1 --model gpt-60-sol
+    [ "$status" -eq 3 ]
+    [[ "$output" != *"Auto-inferred"* ]]
+}
+
+@test "switch_cli.sh: --model gpt-6x-sol(別系統名)は codex型に判定されない (cmd_799境界)" {
+    run bash "${PROJECT_ROOT}/scripts/switch_cli.sh" ashigaru1 --model gpt-6x-sol
+    [ "$status" -eq 3 ]
+    [[ "$output" != *"Auto-inferred"* ]]
+}
+
+@test "switch_cli.sh: --model gpt-5.4-mini(opencode用の名)は codex型に判定されない (cmd_799境界)" {
+    run bash "${PROJECT_ROOT}/scripts/switch_cli.sh" ashigaru1 --model gpt-5.4-mini
+    [ "$status" -eq 3 ]
+    [[ "$output" != *"Auto-inferred"* ]]
+}
+
+@test "switch_cli.sh: --model openai/gpt-6.1-sol(provider付き)は codex型に判定されず曖昧エラー (cmd_799境界)" {
+    run bash "${PROJECT_ROOT}/scripts/switch_cli.sh" ashigaru1 --model openai/gpt-6.1-sol
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"provider-qualified model IDs are ambiguous without --type"* ]]
+    [[ "$output" != *"Auto-inferred"* ]]
+}
+
 # =============================================================================
 # get_model_display_name 統合テスト（switch_cli.sh が依存する表示名）
 # =============================================================================

@@ -82,8 +82,12 @@ def run_model(model_id, prompt, timeout=120):
     """指定モデルでclaudeを直接呼び出す"""
     print(f"\n[{model_id}] 実行中...", flush=True)
     try:
+        # headless の子が project の CLAUDE.md・hooks を継承して親 agent を騙らぬよう
+        # --tools '' と --setting-sources '' を必ず両方付ける。--tools は可変長引数ゆえ
+        # prompt は位置引数ではなく stdin で渡す(直後の位置引数が道具名として食われる)。
         result = subprocess.run(
-            [claude_cmd, '--model', model_id, '-p', prompt],
+            [claude_cmd, '-p', '--tools', '', '--setting-sources', '', '--model', model_id],
+            input=prompt,
             capture_output=True, text=True, timeout=timeout,
             env=env
         )

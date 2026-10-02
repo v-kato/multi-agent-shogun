@@ -65,9 +65,12 @@ Karo's. Karo's part ends at updating the entry's `status` to `done`/
 `cancelled` via `shogun_to_karo_lock.sh update`. Before that update
 (after Gunshi QC PASS) comes step 0, the OSS-side develop commit
 (cmd_788 — "Commit gate for OSS-side deliverables" below); after it
-come Karo's usual completion steps (dashboard ✅戦果 → privategit
-commit/push → ntfy) — see `instructions/roles/karo_role.md`
-"Archive on Completion" for Karo's exact steps.
+come Karo's usual completion steps (dashboard ✅戦果 → privategit add
+→ dual-tracking check `oss_dual_track_check.sh --index` (after the add,
+before the commit; commit only on rc=0) → privategit commit/push →
+③b raw-history backup `oss_raw_backup.sh` → ntfy; cmd_798) — see
+`instructions/roles/karo_role.md` "Archive on Completion" for Karo's
+exact steps.
 
 | Status | In active file? | Action | Actor |
 |--------|----------------|--------|-------|
@@ -324,8 +327,14 @@ date "+%Y-%m-%dT%H:%M:%S"    # For YAML (ISO 8601)
 Rule:
 - Run the same checks as GitHub Actions *before* committing.
 - Only commit when checks are OK.
-- Ask the Lord before any `git push`. ★push only: a local commit to
-  `develop` is part of the completion SOP and needs no approval (F007).
+- Ask the Lord before any `git push` (F007). For this repository, every
+  push to the public origin (or upstream) and every branch deletion there
+  needs its own approval. Publishing to the public origin goes through the
+  aggregate publish (`oss_publish.sh`) only; `develop` is a local trunk and
+  is never pushed (cmd_798).
+- ★No approval needed: a local commit to `develop` (completion SOP
+  step 0), `privategit push`, and the push to the private repo by
+  `oss_raw_backup.sh` (completion SOP ③b) (F007).
 
 Minimum local checks:
 ```bash

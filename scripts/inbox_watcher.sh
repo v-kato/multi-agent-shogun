@@ -169,8 +169,10 @@ PERMISSION_REQUEST_MARGIN_SECONDS="${__PERMISSION_HOOK_MARGIN_SECONDS:-10}"
 
 # 記録ファイル1件が解決済み(hookが返却し終えた)かどうか。hook_resultは
 # hookが記録ファイルへ原子的に追記するトップレベルfieldであり、値の中身
-# (outcome: allow/deny/defer_timeout/failed)は問わない — 存在すること
+# (outcome: allow/deny/defer_timeout/failed/aborted)は問わない — 存在すること
 # 自体が「hookがstdoutへ出すか力尽きて退出するかを終えた」事象を意味する。
+# aborted(cmd_799 ④)は、手動のNo/Escでモーダルが閉じられhookが終了させられた
+# 退出をhookのEXIT trapが記帳したもの。これでguardはfail-safe timeoutを待たず解ける。
 _permission_request_resolved() {
     /usr/bin/grep -qE '^hook_result:' "$1" 2>/dev/null
 }

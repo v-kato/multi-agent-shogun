@@ -137,9 +137,14 @@
 # cmd_775: PermissionRequest hook 本体(権限要求ルーティング)
 !scripts/permission_request_hook.sh
 !scripts/permission_decide.sh
+# cmd_799: 権限要求の孤児記録の計数・退避(削除しない)
+!scripts/permission_orphans.sh
 # cmd_788: 公開リポジトリ向け禁則語走査と、新規ファイルの追跡確認(読取専用の gate 道具)
 !scripts/public_repo_scan.sh
 !scripts/check_tracked.sh
+# cmd_800: 検証道具(CRLF 差分健全性チェッカ・Bats 起動前の TMPDIR 確認 wrapper)
+!scripts/crlf_diff_check.py
+!scripts/bats_tmpdir_guard.sh
 
 
 # SayTask (sample template only, not actual data)
@@ -163,6 +168,8 @@ logs/
 !docs/codex_hook_activation.md
 # cmd_785: 出陣やり直し時の Claude 会話 resume の運用説明
 !docs/claude_session_resume.md
+# cmd_797: 公開リポジトリのbranch運用の説明
+!docs/public_repo_history.md
 
 # Screenshots (masked — no secrets)
 !images/

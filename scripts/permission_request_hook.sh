@@ -21,13 +21,38 @@
 # ★将軍裁定(ii)(cmd_775 Phase D redo2): 記録ファイル書込み成功後の
 #   あらゆる退出経路は、退出**直前**に記録ファイル(queue/state/
 #   permission_requests/<request_id>.yaml。decide.shが書く決定ファイル
-#   とは別物)へ`hook_result: {outcome: allow|deny|defer_timeout|failed,
+#   とは別物)へ`hook_result: {outcome: allow|deny|defer_timeout|failed|aborted,
 #   returned_at: <UTC>}`を原子的に追記してから終了する(`finish()`関数)。
 #   inbox_watcher.shの打鍵抑制guardは、この`hook_result`が書かれるまで
 #   解除しない。記録ファイル自体が書けなかった失敗(記録作成前の失敗)は
 #   追記対象が無いため対象外。hook_result書込みの成否は、決定そのものの
 #   送達(allow/denyのstdout出力・exit code)を変えない(bookkeeping失敗
 #   のためにallow/denyの送達を止めては本末転倒であるため)。
+#
+# ★cmd_799 ④: 手動のNo/Escでモーダルが閉じられると、Claude Codeはhookを
+#   (SIGTERM系で)終了させ、hookはfinish()を通らずEXIT trapだけで退出する
+#   (実測: context/cmd_775_manual_answer_test.md Case B/B2)。この経路でも
+#   結果が記録されないとguardがfail-safe timeout(約30分)まで解けないため、
+#   EXIT trapが「記録ファイル作成後・finish()未経由」の退出に限り
+#   `outcome: aborted`を記帳する。記帳は check-and-set(記録に既に
+#   hook_resultがあれば何も書かない)であり、通常退出経路との二重記帳は
+#   起きない。判定(allow/deny)の中身・timeout値は変えない。
+#
+# ★cmd_799 ④ 堅牢化(QC REDO: 隔離実機22回で17回しか記録されなかった。
+#   context/cmd_799_hook_qc.md §1)。Claude Codeは中断時にSIGTERMを送り、
+#   約1.4秒後にSIGKILL(trap不能)で止める。この約1.4秒の猶予に確実に収める
+#   ため次の3点を取る:
+#   (1) TERM/HUP/INTを明示的にtrapして`exit`し、EXIT trapへ確実に入る。
+#       待機は`sleep & wait`の中断可能な待ちにする(前景のsleepだと、bashだけに
+#       signalが来た場合にsleepが終わるまでtrapが遅れる)。
+#   (2) trap内の記帳はbash組込みだけで行う(python・date等の外部プロセスを
+#       起動しない)。check-and-setは記録を先に読んで`^hook_result:`行の有無を
+#       見る(watcherと同じ判定)。追記は`>>`の1回(O_APPEND)。
+#   (3) 退出処理中に届く追加のsignalで記帳が途切れぬよう、trap内では
+#       TERM/HUP/INTを無視する。
+#   それでも、猶予内にSIGKILLが先行する場合は原理的に記録できない(trap不能)。
+#   その場合は従来どおりfail-safe timeoutが解除し、孤児記録の退避手順
+#   (scripts/permission_orphans.sh・cmd_799 ⑤)が受け皿になる。
 #
 # 入力: stdin JSON (hook input)。出力: 成功時のみ stdout に
 #   hookSpecificOutput JSON。失敗時は何も出力せず exit 1。
@@ -67,7 +92,119 @@ DECISIONS_DIR="$ROOT/queue/state/permission_decisions"
 # python へ `-` で script 本体を heredoc 渡しすると stdin は script 側に
 # 消費されるため、hook自身の stdin(hook入力JSON)は file 経由で渡す。
 STDIN_TMP="$(mktemp)" || exit 1
-trap 'rm -f "$STDIN_TMP"' EXIT
+
+# ─── hook_result記帳 + EXIT trap(cmd_799 ④) ───
+# HOOK_RECORD_PATH: 記録ファイルの書込みに成功した後でだけ設定する(それ以前の
+#   失敗・早期exitでは記帳対象が無いため、trapは何も記帳しない)。
+# HOOK_RESULT_HANDLED: finish()が結果記帳を終えたら1(記帳の試行後に立てる。
+#   立てた後はtrapは再記帳しない=allow/deny/defer_timeout/failedを後から
+#   abortedで上書き・二重記帳しない)。記帳の途中でsignalが来た場合は
+#   立っていないのでtrapがabortedを記帳する。どちらの記帳もファイル側の
+#   check-and-set(`hook_result`の有無)が第2の防壁になる。
+HOOK_RECORD_PATH=""
+HOOK_RESULT_HANDLED=0
+
+# 通常の退出経路(finish)用。記録ファイルへ`hook_result: {outcome,
+# returned_at}`を原子的に追記する。
+# 既に`hook_result`があれば何も書かない(1記録につき高々1回)。既存フィールド
+# (agent_id・session_id・tool_input等)は読み込んだdictへの追加のみで上書き・
+# 削除しない(mkstemp→os.replaceで記録ファイル書込みと同じ原子性を保つ)。
+# 失敗しても呼出し元の退出(exit code・stdout)には影響させない。
+# ★python起動を伴い遅い(静穏時 約45ms・負荷時 約200ms)ため、SIGTERM後の
+#   約1.4秒の猶予に収める必要がある中断経路(EXIT trap)では使わない
+#   (→ write_hook_result_aborted)。
+write_hook_result() {
+    local outcome="$1"
+    local returned_at
+    returned_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    "$PYTHON" - "$HOOK_RECORD_PATH" "$outcome" "$returned_at" \
+        >/dev/null 2>/dev/null <<'PYEOF'
+import sys
+import os
+import tempfile
+import yaml
+
+path, outcome, returned_at = sys.argv[1:4]
+
+try:
+    with open(path, encoding='utf-8') as f:
+        doc = yaml.safe_load(f)
+except Exception:
+    sys.exit(1)
+
+if not isinstance(doc, dict):
+    sys.exit(1)
+
+# check-and-set: 既に結果が記帳されていれば二重に書かない。
+if 'hook_result' in doc:
+    sys.exit(0)
+
+doc['hook_result'] = {'outcome': outcome, 'returned_at': returned_at}
+
+directory = os.path.dirname(path)
+try:
+    fd, tmp_path = tempfile.mkstemp(dir=directory, suffix='.tmp')
+except Exception:
+    sys.exit(1)
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        yaml.safe_dump(doc, f, default_flow_style=False, allow_unicode=True,
+                        sort_keys=False)
+    os.replace(tmp_path, path)
+except Exception:
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    sys.exit(1)
+PYEOF
+    return 0
+}
+
+# 中断経路(EXIT trap)用。`outcome: aborted`の`hook_result`を、bash組込み
+# だけで(外部プロセスを起動せず)記録ファイルの末尾へ追記する。
+# - check-and-set: 記録を先に読み、トップレベルに`hook_result:`行が既にあれば
+#   何も書かない(watcherの`^hook_result:`と同じ判定・二重記帳しない)。
+# - 追記は`>>`の1回(O_APPEND)でwrite(2)も1回。bashのprintfは改行ごとにwrite(2)
+#   を分けて出す(strace実測)ため、中途半端な記録を残さぬよう末尾の改行1つだけの
+#   1行(YAMLのフロー形式。yaml.safe_loadでは通常の`hook_result`と同じdict)で書く。
+#   returned_atはpython記帳と同じ単引用符付きの文字列(UTC)。記録(末尾は改行)の
+#   既存フィールドには触れない。
+# - 記録ファイルが無ければ何もしない(`>>`が記録を新規作成するのを防ぐ)。
+# 失敗しても退出(exit code・stdout)には影響させない。
+write_hook_result_aborted() {
+    local content='' returned_at=''
+    [ -f "$HOOK_RECORD_PATH" ] || return 0
+    IFS= read -r -d '' content 2>/dev/null < "$HOOK_RECORD_PATH"
+    case $'\n'"$content" in
+        *$'\n'hook_result:*) return 0 ;;
+    esac
+    TZ=UTC printf -v returned_at '%(%Y-%m-%dT%H:%M:%SZ)T' -1
+    printf "hook_result: {outcome: aborted, returned_at: '%s'}\n" "$returned_at" \
+        >> "$HOOK_RECORD_PATH" 2>/dev/null
+    return 0
+}
+
+# EXIT trap: 記録作成後にfinish()を経ず退出する場合(手動No/Escに伴うhook終了
+# =SIGTERM系など)は outcome=aborted を記帳し、その後でstdin退避fileを消す
+# (記帳を最優先にする)。trap内ではexitを呼ばない(元の退出状態を変えない)。
+# 退出処理中に届く追加のsignal(重ねてのTERM等)で記帳が途切れぬよう、まず
+# TERM/HUP/INTを無視にする。
+cleanup_on_exit() {
+    trap '' TERM HUP INT
+    if [ -n "$HOOK_RECORD_PATH" ] && [ "$HOOK_RESULT_HANDLED" -ne 1 ]; then
+        write_hook_result_aborted
+    fi
+    rm -f "$STDIN_TMP"
+}
+trap cleanup_on_exit EXIT
+# TERM/HUP/INTを明示的にtrapして`exit`し、EXIT trapへ確実に入る(既定の
+# 動作任せだとEXIT trapへ入る前にSIGKILLが先行して記録されない実測がある)。
+# 終了コードは慣例の128+signal(Claude Codeはexit 2だけをblocking扱いとし、
+# 129/130/143は通常のnon-blocking errorとして扱われる)。
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+trap 'exit 130' INT
 cat > "$STDIN_TMP" || exit 1
 
 # ─── 手順1: JSON parse + 必須field検証(fail-closed) ───
@@ -253,53 +390,21 @@ then
     exit 1   # fail-closed: 記録ファイル書込み失敗(allowへ倒れる経路なし)
 fi
 
-# ─── hook_result書込み(将軍裁定(ii)) ───
+# ─── 記録ファイル作成済み: 以後の退出はhook_resultを記帳する(将軍裁定(ii)) ───
 # 記録ファイルが実在することが保証された(直前のブロックで書込み成功)
-# 以後のあらゆる退出経路で呼ぶ。既存フィールド(agent_id・session_id・
-# tool_input等)は読み込んだdictへの追加のみで上書き・削除しない
-# (mkstemp→os.replaceで記録ファイル書込みと同じ原子性を保つ)。
+# ので、ここからEXIT trapのabortedフォールバックも有効にする(cmd_799 ④)。
+HOOK_RECORD_PATH="$REQUESTS_DIR/${REQUEST_ID}.yaml"
+
+# 通常の退出経路で呼ぶ。結果記帳(write_hook_result)を終えてから終了する。
+# HOOK_RESULT_HANDLEDは記帳の試行後に立てる: trapがabortedで重ねて記帳しない
+# ため(bookkeeping失敗でもallow/denyの送達は変えない・outcomeを誤記しない)。
+# 記帳の途中でsignalが来た場合は未設定のままtrapへ入り、trapのabortedが
+# 記録を残す(結果が何も記録されず guardが長く残るよりよい)。
 finish() {
     local outcome="$1"
     local exit_code="$2"
-    local returned_at
-    returned_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    "$PYTHON" - "$REQUESTS_DIR/${REQUEST_ID}.yaml" "$outcome" "$returned_at" \
-        >/dev/null 2>/dev/null <<'PYEOF'
-import sys
-import os
-import tempfile
-import yaml
-
-path, outcome, returned_at = sys.argv[1:4]
-
-try:
-    with open(path, encoding='utf-8') as f:
-        doc = yaml.safe_load(f)
-except Exception:
-    sys.exit(1)
-
-if not isinstance(doc, dict):
-    sys.exit(1)
-
-doc['hook_result'] = {'outcome': outcome, 'returned_at': returned_at}
-
-directory = os.path.dirname(path)
-try:
-    fd, tmp_path = tempfile.mkstemp(dir=directory, suffix='.tmp')
-except Exception:
-    sys.exit(1)
-try:
-    with os.fdopen(fd, 'w', encoding='utf-8') as f:
-        yaml.safe_dump(doc, f, default_flow_style=False, allow_unicode=True,
-                        sort_keys=False)
-    os.replace(tmp_path, path)
-except Exception:
-    try:
-        os.unlink(tmp_path)
-    except OSError:
-        pass
-    sys.exit(1)
-PYEOF
+    write_hook_result "$outcome"
+    HOOK_RESULT_HANDLED=1
     exit "$exit_code"
 }
 
@@ -400,7 +505,11 @@ PYEOF
         # RC==2(schema不正・旧defer値を含む) / OUTが空、いずれもfail-closed
         finish failed 1
     fi
-    sleep "$POLL_INTERVAL_SECONDS"
+    # 中断可能な待ち(cmd_799 ④): 前景のsleepだと、bashだけにTERMが来た場合に
+    # sleepが終わるまでtrapが遅れる。`wait`はtrap済みsignalで即座に戻る。
+    # sleepはstdout/stderrを掴ませない(残ってもhookのpipeを塞がない)。
+    sleep "$POLL_INTERVAL_SECONDS" >/dev/null 2>&1 &
+    wait $!
 done
 
 # deadline到達: 決定が届かなかった。fail-closed(通常モーダルへ委ねる)。
